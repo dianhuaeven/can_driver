@@ -17,6 +17,8 @@
 class SocketCanController : public CanTransport {
 public:
     SocketCanController();
+    // Extra ctor for dependency injection in tests
+    explicit SocketCanController(can::ThreadedSocketCANInterfaceSharedPtr injectedInterface);
     ~SocketCanController() override;
 
     /**
@@ -38,6 +40,8 @@ public:
 
 private:
     void handleFrame(const can::Frame &frame);
+    // test seam
+    friend class SocketCanControllerTestAccessor;
     void dispatchReceive(const CanTransport::Frame &frame);
     can::Frame toSocketCanFrame(const CanTransport::Frame &frame) const;
     CanTransport::Frame fromSocketCanFrame(const can::Frame &frame) const;
