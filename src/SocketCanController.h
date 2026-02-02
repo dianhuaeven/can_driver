@@ -28,7 +28,7 @@ public:
 
     void shutdown();
 
-    void send(const std::uint8_t *data, std::size_t size) override;
+    void send(const CanTransport::Frame &frame) override;
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override;
     void removeReceiveHandler(std::size_t handlerId) override;
@@ -37,12 +37,10 @@ public:
     std::string device() const;
 
 private:
-    static constexpr std::size_t kFrameBytes = 13;
-
     void handleFrame(const can::Frame &frame);
-    void dispatchReceive(const Buffer &buffer);
-    bool parseBufferToFrame(const std::uint8_t *data, can::Frame &frame) const;
-    Buffer encodeFrame(const can::Frame &frame) const;
+    void dispatchReceive(const CanTransport::Frame &frame);
+    can::Frame toSocketCanFrame(const CanTransport::Frame &frame) const;
+    CanTransport::Frame fromSocketCanFrame(const can::Frame &frame) const;
 
     can::ThreadedSocketCANInterfaceSharedPtr interface_;
     can::CommInterface::FrameListenerConstSharedPtr frameListener_;

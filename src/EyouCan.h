@@ -114,7 +114,7 @@ private:
     /**
      * @brief 处理来自底层传输的回复帧（0x02/0x04）
      */
-    void handleResponse(const CanTransport::Buffer &data);
+    void handleResponse(const CanTransport::Frame &data);
     void requestPosition(uint8_t motorId) const;
     void requestMode(uint8_t motorId) const;
     void requestEnable(uint8_t motorId) const;

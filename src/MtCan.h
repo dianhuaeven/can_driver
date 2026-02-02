@@ -129,9 +129,9 @@ private:
     void refreshMotorStates();
     void stopRefreshLoop();
     /**
-     * @brief 解析 UDP 返回帧，更新缓存
+     * @brief 解析 CAN 返回帧，更新缓存
      */
-    void handleResponse(const CanTransport::Buffer &data);
+    void handleResponse(const CanTransport::Frame &data);
 };
 
 #endif // MTCAN_H

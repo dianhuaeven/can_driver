@@ -1,39 +1,41 @@
 #include "EyouCan.h"
 
-#include <array>
+#include <algorithm>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
-#include <cstring>
 #include <iomanip>
 #include <iostream>
 
 namespace {
-constexpr std::size_t kFrameSize = 13;
-constexpr uint8_t kHeaderByte = 0x06;
 constexpr uint8_t kWriteCommand = 0x01;
 constexpr uint8_t kReadCommand = 0x03;
 constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
 
-uint16_t readCanId(const CanTransport::Buffer &data, std::size_t offset)
+uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
-    return static_cast<uint16_t>((static_cast<uint16_t>(data[offset]) << 8) |
-                                 static_cast<uint16_t>(data[offset + 1]));
+    if (index + 3 >= frame.dlc) {
+        return 0;
+    }
+    return (static_cast<uint32_t>(frame.data[index]) << 24) |
+           (static_cast<uint32_t>(frame.data[index + 1]) << 16) |
+           (static_cast<uint32_t>(frame.data[index + 2]) << 8) |
+           static_cast<uint32_t>(frame.data[index + 3]);
 }
 
-uint32_t readUInt32BE(const CanTransport::Buffer &data, std::size_t offset)
+int32_t readInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
-    return (static_cast<uint32_t>(data[offset]) << 24) |
-           (static_cast<uint32_t>(data[offset + 1]) << 16) |
-           (static_cast<uint32_t>(data[offset + 2]) << 8) |
-           static_cast<uint32_t>(data[offset + 3]);
+    return static_cast<int32_t>(readUInt32BE(frame, index));
 }
 
-int32_t readInt32BE(const CanTransport::Buffer &data, std::size_t offset)
+uint8_t dataByteOrZero(const CanTransport::Frame &frame, std::size_t index)
 {
-    return static_cast<int32_t>(readUInt32BE(data, offset));
+    if (index >= frame.dlc) {
+        return 0;
+    }
+    return frame.data[index];
 }
 } // namespace
 
@@ -42,7 +44,7 @@ EyouCan::EyouCan(std::shared_ptr<CanTransport> controller)
 {
     if (canController) {
         receiveHandlerId = canController->addReceiveHandler(
-            [this](const CanTransport::Buffer &payload) { handleResponse(payload); });
+            [this](const CanTransport::Frame &frame) { handleResponse(frame); });
     }
 }
 
@@ -238,18 +240,21 @@ void EyouCan::sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t val
         payloadBytes = 4;
     }
 
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = kHeaderByte;
-    frame[4] = motorId;
-    frame[5] = kWriteCommand;
-    frame[6] = subCommand;
+    CanTransport::Frame frame;
+    frame.id = kEyouIdFrameBase + motorId;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    const std::size_t maxPayload = std::min<std::size_t>(payloadBytes, frame.data.size() - 2);
+    frame.dlc = static_cast<std::uint8_t>(2 + maxPayload);
+    frame.data[0] = kWriteCommand;
+    frame.data[1] = subCommand;
 
-    for (std::size_t i = 0; i < payloadBytes; ++i) {
+    for (std::size_t i = 0; i < maxPayload; ++i) {
         const int shift = static_cast<int>((payloadBytes - 1 - i) * 8);
-        frame[7 + i] = static_cast<uint8_t>((value >> shift) & 0xFF);
+        frame.data[2 + i] = static_cast<uint8_t>((value >> shift) & 0xFF);
     }
 
-    canController->send(frame.data(), frame.size());
+    canController->send(frame);
 }
 
 void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand) const
@@ -258,66 +263,66 @@ void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand) const
         return;
     }
 
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = kHeaderByte;
-    frame[4] = motorId;
-    frame[5] = kReadCommand;
-    frame[6] = subCommand;
-    canController->send(frame.data(), frame.size());
+    CanTransport::Frame frame;
+    frame.id = kEyouIdFrameBase + motorId;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 2;
+    frame.data[0] = kReadCommand;
+    frame.data[1] = subCommand;
+    canController->send(frame);
 }
 
-void EyouCan::handleResponse(const CanTransport::Buffer &data)
+void EyouCan::handleResponse(const CanTransport::Frame &frame)
 {
-    if (data.size() < kFrameSize) {
+    if (frame.isExtended || frame.dlc < 2) {
         return;
     }
 
-    for (std::size_t offset = 0; offset + kFrameSize <= data.size(); offset += kFrameSize) {
-        const uint16_t canId = readCanId(data, offset + 3);
-        const uint8_t responseType = static_cast<uint8_t>(data[offset + 5]);
-        const uint8_t motorId = static_cast<uint8_t>(data[offset + 4]);
-        const uint8_t subCommand = static_cast<uint8_t>(data[offset + 6]);
+    const uint16_t canId = static_cast<uint16_t>(frame.id & 0x7FF);
+    const uint8_t motorId = static_cast<uint8_t>(canId & 0xFF);
+    if (canId != kEyouIdFrameBase + motorId) {
+        std::cerr << "[EyouCan] Ignore frame with CAN ID 0x"
+                  << std::hex << canId << " (expected 0x"
+                  << static_cast<int>(motorId) << ')' << std::dec << '\n';
+        return;
+    }
 
-        if (canId != kEyouIdFrameBase + motorId) {
-            std::cerr << "[EyouCan] Ignore frame with CAN ID 0x"
-                      << std::hex << canId << " (expected 0x"
-                      << static_cast<int>(motorId) << ')' << std::dec << '\n';
-            continue;
-        }
+    const uint8_t responseType = frame.data[0];
+    const uint8_t subCommand = frame.data[1];
 
-        {
-            std::lock_guard<std::mutex> stateLock(stateMutex);
-            MotorState &state = motorStates[motorId];
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        MotorState &state = motorStates[motorId];
 
-            if (responseType == kWriteAck) {
-                switch (subCommand) {
-                case 0x10:
-                    state.enabled = data[offset + 7] != 0;
-                    break;
-                case 0x0F:
-                    state.mode = data[offset + 10] == 0x03 ? MotorMode::Velocity : MotorMode::Position;
-                    break;
-                default:
-                    break;
-                }
-            } else if (responseType == kReadResponse) {
-                switch (subCommand) {
-                case 0x07:
-                    state.position = readInt32BE(data, offset + 7);
-                    break;
-                case 0x0F:
-                    state.mode = data[offset + 10] == 0x03 ? MotorMode::Velocity : MotorMode::Position;
-                    break;
-                case 0x10:
-                    state.enabled = data[offset + 10] != 0;
-                    break;
-                case 0x15:
-                    std::cerr << "[EyouCan] Motor " << static_cast<int>(motorId)
-                              << " reported error code " << readUInt32BE(data, offset + 9) << '\n';
-                    break;
-                default:
-                    break;
-                }
+        if (responseType == kWriteAck) {
+            switch (subCommand) {
+            case 0x10:
+                state.enabled = dataByteOrZero(frame, 2) != 0;
+                break;
+            case 0x0F:
+                state.mode = dataByteOrZero(frame, 5) == 0x03 ? MotorMode::Velocity : MotorMode::Position;
+                break;
+            default:
+                break;
+            }
+        } else if (responseType == kReadResponse) {
+            switch (subCommand) {
+            case 0x07:
+                state.position = readInt32BE(frame, 2);
+                break;
+            case 0x0F:
+                state.mode = dataByteOrZero(frame, 5) == 0x03 ? MotorMode::Velocity : MotorMode::Position;
+                break;
+            case 0x10:
+                state.enabled = dataByteOrZero(frame, 5) != 0;
+                break;
+            case 0x15:
+                std::cerr << "[EyouCan] Motor " << static_cast<int>(motorId)
+                          << " reported error code " << readUInt32BE(frame, 4) << '\n';
+                break;
+            default:
+                break;
             }
         }
     }
