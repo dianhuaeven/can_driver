@@ -112,6 +112,12 @@ catkin_package(
   CATKIN_DEPENDS controller_manager hardware_interface roscpp socketcan_interface std_msgs
 )
 
+# Enable testing
+if(CATKIN_ENABLE_TESTING)
+  find_package(rostest REQUIRED)
+  find_package(GTest REQUIRED)
+endif()
+
 ###########
 ## Build ##
 ###########
@@ -206,10 +212,29 @@ target_link_libraries(can_driver_transport
 #############
 
 ## Add gtest based cpp test target and link libraries
-# catkin_add_gtest(${PROJECT_NAME}-test test/test_can_driver.cpp)
-# if(TARGET ${PROJECT_NAME}-test)
-#   target_link_libraries(${PROJECT_NAME}-test ${PROJECT_NAME})
-# endif()
+# Add gtest based cpp test target and link libraries
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(test_socketcan_controller
+    tests/test_socketcan_controller.cpp
+  )
+  if(TARGET test_socketcan_controller)
+    target_include_directories(test_socketcan_controller PRIVATE include ${GTEST_INCLUDE_DIRS})
+    # Link against gtest and gtest_main to provide main()
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_socketcan_controller
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_socketcan_controller
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+endif()
 
 ## Add folders to be run by python nosetests
 # catkin_add_nosetests(test)

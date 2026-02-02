@@ -13,6 +13,11 @@ SocketCanController::SocketCanController()
 {
 }
 
+SocketCanController::SocketCanController(can::ThreadedSocketCANInterfaceSharedPtr injectedInterface)
+    : interface_(std::move(injectedInterface))
+{
+}
+
 SocketCanController::~SocketCanController()
 {
     shutdown();
