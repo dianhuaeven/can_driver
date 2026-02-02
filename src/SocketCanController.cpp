@@ -1,4 +1,4 @@
-#include "SocketCanController.h"
+#include "can_driver/SocketCanController.h"
 
 #include <ros/console.h>
 #include <socketcan_interface/threading.h>
