@@ -1,33 +1,32 @@
 #include "MtCan.h"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
-#include <cstring>
 #include <iomanip>
 #include <iostream>
 
 namespace {
-constexpr std::size_t kFrameSize = 13;
 constexpr uint16_t kResponseBaseId = 0x240;
 
-int16_t readInt16LE(const CanTransport::Buffer &frame, std::size_t offset)
+int16_t readInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
-    const int value = static_cast<int>(frame[offset]) |
-                      (static_cast<int>(frame[offset + 1]) << 8);
+    if (index + 1 >= frame.dlc) {
+        return 0;
+    }
+    const int value = static_cast<int>(frame.data[index]) |
+                      (static_cast<int>(frame.data[index + 1]) << 8);
     return static_cast<int16_t>(value);
 }
 
-uint16_t readUInt16LE(const CanTransport::Buffer &frame, std::size_t offset)
+uint16_t readUInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
-    return static_cast<uint16_t>(static_cast<uint16_t>(frame[offset]) |
-                                 (static_cast<uint16_t>(frame[offset + 1]) << 8));
-}
-
-uint16_t readCanId(const CanTransport::Buffer &frame, std::size_t offset)
-{
-    return static_cast<uint16_t>((static_cast<uint16_t>(frame[offset]) << 8) |
-                                 static_cast<uint16_t>(frame[offset + 1]));
+    if (index + 1 >= frame.dlc) {
+        return 0;
+    }
+    return static_cast<uint16_t>(static_cast<uint16_t>(frame.data[index]) |
+                                 (static_cast<uint16_t>(frame.data[index + 1]) << 8));
 }
 } // namespace
 
@@ -36,7 +35,7 @@ MtCan::MtCan(std::shared_ptr<CanTransport> controller)
 {
     if (canController) {
         receiveHandlerId = canController->addReceiveHandler(
-            [this](const CanTransport::Buffer &payload) { handleResponse(payload); });
+            [this](const CanTransport::Frame &frame) { handleResponse(frame); });
     }
 }
 
@@ -136,28 +135,22 @@ void MtCan::setPosition(MotorID Id, int32_t position)
     const int32_t limitedVelocity = std::max<int32_t>(-32768, std::min<int32_t>(32767, commandedVelocity));
     const int16_t velocity = static_cast<int16_t>(limitedVelocity);
 
-    std::array<uint8_t, 4> payload {
-        static_cast<uint8_t>(velocity & 0x00FF),
-        static_cast<uint8_t>((velocity >> 8) & 0x00FF),
-        static_cast<uint8_t>(position & 0x00FF),
-        static_cast<uint8_t>((position >> 8) & 0x00FF)
-    };
-
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = 0x08;
-    frame[3] = static_cast<uint8_t>((canId >> 8) & 0xFF);
-    frame[4] = static_cast<uint8_t>(canId & 0xFF);
-    frame[5] = 0xA4;
-    frame[6] = 0x00;
-    frame[7] = payload[0];
-    frame[8] = payload[1];
-    frame[9] = payload[2];
-    frame[10] = payload[3];
-    frame[11] = static_cast<uint8_t>((position >> 16) & 0xFF);
-    frame[12] = static_cast<uint8_t>((position >> 24) & 0xFF);
+    CanTransport::Frame frame;
+    frame.id = canId;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0xA4;
+    frame.data[1] = 0x00;
+    frame.data[2] = static_cast<uint8_t>(velocity & 0xFF);
+    frame.data[3] = static_cast<uint8_t>((velocity >> 8) & 0xFF);
+    frame.data[4] = static_cast<uint8_t>(position & 0xFF);
+    frame.data[5] = static_cast<uint8_t>((position >> 8) & 0xFF);
+    frame.data[6] = static_cast<uint8_t>((position >> 16) & 0xFF);
+    frame.data[7] = static_cast<uint8_t>((position >> 24) & 0xFF);
 
     if (canController) {
-        canController->send(frame.data(), frame.size());
+        canController->send(frame);
     }
 }
 
@@ -262,16 +255,20 @@ void MtCan::sendFrame(uint16_t canId, uint8_t command, const std::array<uint8_t,
         return;
     }
 
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = 0x08;
-    frame[3] = static_cast<uint8_t>((canId >> 8) & 0xFF);
-    frame[4] = static_cast<uint8_t>(canId & 0xFF);
-    frame[5] = command;
-    frame[9] = payload[0];
-    frame[10] = payload[1];
-    frame[11] = payload[2];
-    frame[12] = payload[3];
-    canController->send(frame.data(), frame.size());
+    CanTransport::Frame frame;
+    frame.id = canId;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = command;
+    frame.data[1] = 0x00;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = payload[0];
+    frame.data[5] = payload[1];
+    frame.data[6] = payload[2];
+    frame.data[7] = payload[3];
+    canController->send(frame);
 }
 
 void MtCan::requestState(uint8_t motorId) const
@@ -281,12 +278,13 @@ void MtCan::requestState(uint8_t motorId) const
         return;
     }
 
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = 0x08;
-    frame[3] = static_cast<uint8_t>((canId >> 8) & 0xFF);
-    frame[4] = static_cast<uint8_t>(canId & 0xFF);
-    frame[5] = 0x9C;
-    canController->send(frame.data(), frame.size());
+    CanTransport::Frame frame;
+    frame.id = canId;
+    frame.dlc = 1;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x9C;
+    canController->send(frame);
 }
 
 void MtCan::requestError(uint8_t motorId) const
@@ -296,12 +294,13 @@ void MtCan::requestError(uint8_t motorId) const
         return;
     }
 
-    std::array<uint8_t, kFrameSize> frame {};
-    frame[0] = 0x08;
-    frame[3] = static_cast<uint8_t>((canId >> 8) & 0xFF);
-    frame[4] = static_cast<uint8_t>(canId & 0xFF);
-    frame[5] = 0x9A;
-    canController->send(frame.data(), frame.size());
+    CanTransport::Frame frame;
+    frame.id = canId;
+    frame.dlc = 1;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x9A;
+    canController->send(frame);
 }
 
 void MtCan::resetSystem(uint8_t motorId) const
@@ -346,55 +345,57 @@ void MtCan::stopRefreshLoop()
     }
 }
 
-void MtCan::handleResponse(const CanTransport::Buffer &data)
+void MtCan::handleResponse(const CanTransport::Frame &frame)
 {
-    if (data.size() < kFrameSize) {
+    if (frame.isExtended) {
         return;
     }
 
-    for (std::size_t offset = 0; offset + kFrameSize <= data.size(); offset += kFrameSize) {
-        const uint16_t canId = readCanId(data, offset + 3);
-        if (canId < kResponseBaseId || canId >= kResponseBaseId + 0x100) {
-            std::cerr << "[MtCan] Ignore frame with CAN ID 0x"
-                      << std::hex << canId << std::dec << '\n';
-            continue;
+    const uint16_t canId = static_cast<uint16_t>(frame.id & 0x7FF);
+    if (canId < kResponseBaseId || canId >= kResponseBaseId + 0x100) {
+        std::cerr << "[MtCan] Ignore frame with CAN ID 0x"
+                  << std::hex << canId << std::dec << '\n';
+        return;
+    }
+
+    if (frame.dlc == 0) {
+        return;
+    }
+
+    const uint8_t command = frame.data[0];
+    const uint8_t nodeId = static_cast<uint8_t>(canId & 0x00FF);
+    bool shouldReset = false;
+
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        MotorState &state = motorStates[nodeId];
+
+        switch (command) {
+        case 0x9C: {
+            const int16_t rawCurrent = readInt16LE(frame, 2);
+            state.current = static_cast<double>(rawCurrent) / 100.0;
+            const int16_t rawVelocity = readInt16LE(frame, 4);
+            state.velocity = static_cast<int16_t>(rawVelocity / 6);
+            break;
         }
-
-        const uint8_t command = static_cast<uint8_t>(data[offset + 5]);
-        const uint8_t nodeId = static_cast<uint8_t>(canId & 0x00FF);
-        bool shouldReset = false;
-
-        {
-            std::lock_guard<std::mutex> stateLock(stateMutex);
-            MotorState &state = motorStates[nodeId];
-
-            switch (command) {
-            case 0x9C: {
-                const int16_t rawCurrent = readInt16LE(data, offset + 7);
-                state.current = static_cast<double>(rawCurrent) / 100.0;
-                const int16_t rawVelocity = readInt16LE(data, offset + 9);
-                state.velocity = static_cast<int16_t>(rawVelocity / 6);
-                break;
+        case 0x9A: {
+            const uint16_t errorCode = readUInt16LE(frame, 6);
+            state.error = errorCode != 0;
+            if (state.error) {
+                std::cerr << "[MtCan] Motor " << static_cast<int>(nodeId)
+                          << " error code " << errorCode << '\n';
             }
-            case 0x9A: {
-                const uint16_t errorCode = readUInt16LE(data, offset + 11);
-                state.error = errorCode != 0;
-                if (state.error) {
-                    std::cerr << "[MtCan] Motor " << static_cast<int>(nodeId)
-                              << " error code " << errorCode << '\n';
-                }
-                break;
-            }
-            case 0x64:
-                shouldReset = true;
-                break;
-            default:
-                break;
-            }
+            break;
         }
-
-        if (shouldReset) {
-            resetSystem(nodeId);
+        case 0x64:
+            shouldReset = true;
+            break;
+        default:
+            break;
         }
+    }
+
+    if (shouldReset) {
+        resetSystem(nodeId);
     }
 }

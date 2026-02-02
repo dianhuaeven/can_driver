@@ -8,10 +8,6 @@
 #include <cstring>
 #include <functional>
 
-namespace {
-constexpr std::size_t kFrameBytes = 13;
-}
-
 SocketCanController::SocketCanController()
     : interface_(std::make_shared<can::ThreadedSocketCANInterface>())
 {
@@ -81,27 +77,20 @@ std::string SocketCanController::device() const
     return deviceName_;
 }
 
-void SocketCanController::send(const std::uint8_t *data, std::size_t size)
+void SocketCanController::send(const CanTransport::Frame &frame)
 {
-    if (!initialized_.load() || !interface_ || !data || size == 0) {
+    if (!initialized_.load() || !interface_) {
         return;
     }
 
-    if (size % kFrameBytes != 0) {
-        ROS_ERROR_STREAM("[SocketCanController] Payload size " << size
-                         << " is not a multiple of " << kFrameBytes);
+    const can::Frame socketFrame = toSocketCanFrame(frame);
+    if (!socketFrame.isValid()) {
+        ROS_WARN_STREAM("[SocketCanController] Skip invalid frame for device " << deviceName_);
         return;
     }
 
-    for (std::size_t offset = 0; offset < size; offset += kFrameBytes) {
-        can::Frame frame;
-        if (!parseBufferToFrame(data + offset, frame)) {
-            ROS_WARN("[SocketCanController] Skip malformed frame");
-            continue;
-        }
-        if (!interface_->send(frame)) {
-            ROS_WARN_STREAM("[SocketCanController] Failed to enqueue frame on " << deviceName_);
-        }
+    if (!interface_->send(socketFrame)) {
+        ROS_WARN_STREAM("[SocketCanController] Failed to enqueue frame on " << deviceName_);
     }
 }
 
@@ -129,10 +118,10 @@ void SocketCanController::removeReceiveHandler(std::size_t handlerId)
 
 void SocketCanController::handleFrame(const can::Frame &frame)
 {
-    dispatchReceive(encodeFrame(frame));
+    dispatchReceive(fromSocketCanFrame(frame));
 }
 
-void SocketCanController::dispatchReceive(const Buffer &buffer)
+void SocketCanController::dispatchReceive(const CanTransport::Frame &frame)
 {
     std::unordered_map<std::size_t, ReceiveHandler> handlersCopy;
     {
@@ -142,49 +131,34 @@ void SocketCanController::dispatchReceive(const Buffer &buffer)
 
     for (auto &entry : handlersCopy) {
         if (entry.second) {
-            entry.second(buffer);
+            entry.second(frame);
         }
     }
 }
 
-bool SocketCanController::parseBufferToFrame(const std::uint8_t *data, can::Frame &frame) const
+can::Frame SocketCanController::toSocketCanFrame(const CanTransport::Frame &frame) const
 {
-    if (!data) {
-        return false;
+    can::Frame socketFrame;
+    socketFrame.id = frame.id;
+    socketFrame.is_extended = frame.isExtended ? 1 : 0;
+    socketFrame.is_rtr = frame.isRemoteRequest ? 1 : 0;
+    socketFrame.is_error = 0;
+    socketFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(socketFrame.data.size()));
+    for (std::size_t i = 0; i < socketFrame.dlc; ++i) {
+        socketFrame.data[i] = frame.data[i];
     }
-
-    const std::uint8_t dlc = data[0];
-    if (dlc > 8) {
-        return false;
-    }
-
-    const std::uint16_t canId =
-        static_cast<std::uint16_t>(static_cast<std::uint16_t>(data[3]) << 8) |
-        static_cast<std::uint16_t>(data[4]);
-
-    frame = can::Frame();
-    frame.id = canId;
-    frame.is_extended = 0;
-    frame.is_rtr = 0;
-    frame.is_error = 0;
-    frame.dlc = dlc;
-
-    for (std::size_t i = 0; i < dlc && i < frame.data.size(); ++i) {
-        frame.data[i] = data[5 + i];
-    }
-    return true;
+    return socketFrame;
 }
 
-SocketCanController::Buffer SocketCanController::encodeFrame(const can::Frame &frame) const
+CanTransport::Frame SocketCanController::fromSocketCanFrame(const can::Frame &frame) const
 {
-    Buffer buffer(kFrameBytes, 0);
-    buffer[0] = frame.dlc;
-    buffer[3] = static_cast<std::uint8_t>((frame.id >> 8) & 0xFF);
-    buffer[4] = static_cast<std::uint8_t>(frame.id & 0xFF);
-
-    const std::size_t bytes = std::min<std::size_t>(frame.dlc, frame.data.size());
-    for (std::size_t i = 0; i < bytes; ++i) {
-        buffer[5 + i] = frame.data[i];
+    CanTransport::Frame userFrame;
+    userFrame.id = frame.id;
+    userFrame.isExtended = frame.is_extended != 0;
+    userFrame.isRemoteRequest = frame.is_rtr != 0;
+    userFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(userFrame.data.size()));
+    for (std::size_t i = 0; i < userFrame.dlc; ++i) {
+        userFrame.data[i] = frame.data[i];
     }
-    return buffer;
+    return userFrame;
 }
