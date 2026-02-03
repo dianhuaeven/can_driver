@@ -1,0 +1,14 @@
+# goal
+uint16 motor_id
+float64 target_position
+float64 target_velocity
+float64 max_duration # seconds
+---
+# result
+bool success
+string message
+---
+# feedback
+float64 current_position
+float64 current_velocity
+float64 elapsed_time
