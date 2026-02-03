@@ -1,0 +1,5 @@
+string device
+bool loopback
+---
+bool success
+string message

@@ -1,0 +1,12 @@
+# goal
+uint16 motor_id
+bool search_positive
+float64 timeout
+---
+# result
+bool success
+string message
+---
+# feedback
+float64 progress # 0.0~1.0
+float64 current_position

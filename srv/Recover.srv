@@ -1,0 +1,4 @@
+uint16 motor_id # 0 表示全局恢复
+---
+bool success
+string message
