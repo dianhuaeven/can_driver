@@ -30,7 +30,7 @@ controller_manager:
 # 这个控制器只读不写，不会向电机发送任何指令。
 joint_state_controller:
   type: joint_state_controller/JointStateController
-  publish_rate: 50    # /joint_states 发布频率（Hz），50 Hz 对 RViz 可视化已足够
+  publish_rate: 100    # /joint_states 发布频率（Hz），提高到 100 Hz 以获得更流畅的可视化
 
 
 # =============================================================================
@@ -44,20 +44,41 @@ joint_state_controller:
 arm_controller:
   type: position_controllers/JointTrajectoryController
 
-  # 受控关节列表，名称须与 can_driver.yaml 中的 name 字段及 URDF 完全一致。
+  # 受控关节列表（UR5 仿真测试用），名称须与 can_driver.yaml 中的 name 字段及 URDF 完全一致。
+  # 实物联调时改回实际关节名。
   joints:
-    - rotary_table    # 转台（第 1 轴）
-    - larger_arm      # 大臂（第 2 轴）
-    - smaller_arm     # 小臂（第 3 轴）
-    - wrist_x         # 腕部 X 轴（第 4 轴）
-    - wrist_y         # 腕部 Y 轴（第 5 轴）
-    - wrist_z         # 腕部 Z 轴（第 6 轴）
-    - actuator        # 末端执行器（第 7 轴）
+    - shoulder_pan_joint    # UR5 第 1 轴
+    - shoulder_lift_joint   # UR5 第 2 轴
+    - elbow_joint           # UR5 第 3 轴
+    - wrist_1_joint         # UR5 第 4 轴
+    - wrist_2_joint         # UR5 第 5 轴
+    - wrist_3_joint         # UR5 第 6 轴
 
-  # 轨迹执行约束（可选，未填则使用插件默认值）
-  # constraints:
-  #   goal_time: 0.5          # 允许超出目标时间的秒数
-  #   stopped_velocity_tolerance: 0.01  # 到达目标时速度容差（rad/s）
+  # 轨迹执行约束
+  constraints:
+    goal_time: 0.6                      # 允许超出目标时间的秒数
+    stopped_velocity_tolerance: 0.05    # 到达目标时速度容差（rad/s）
+    shoulder_pan_joint:
+      trajectory: 0.1                   # 轨迹跟踪位置容差（rad）
+      goal: 0.05                        # 目标位置容差（rad）
+    shoulder_lift_joint:
+      trajectory: 0.1
+      goal: 0.05
+    elbow_joint:
+      trajectory: 0.1
+      goal: 0.05
+    wrist_1_joint:
+      trajectory: 0.1
+      goal: 0.05
+    wrist_2_joint:
+      trajectory: 0.1
+      goal: 0.05
+    wrist_3_joint:
+      trajectory: 0.1
+      goal: 0.05
+
+  # 状态发布频率（用于 action feedback）
+  state_publish_rate: 50
 
 
 # =============================================================================

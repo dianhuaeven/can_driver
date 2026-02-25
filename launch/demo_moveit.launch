@@ -1,0 +1,56 @@
+<?xml version="1.0"?>
+<launch>
+  <!-- =========================================================
+       can_driver + MoveIt 集成测试 launch 文件
+
+       功能：在 RViz 中使用 MoveIt 规划 UR5 轨迹，通过 can_driver
+            的软件回环模式验证 ros_control 集成是否正常。
+
+       测试流程：
+       1. can_driver_node 启动，加载 UR5 关节配置（vcan1 软件回环）
+       2. MoveIt move_group 启动，连接到 arm_controller
+       3. RViz 启动，可视化机器人并提供 MoveIt 交互界面
+       4. 在 RViz 中拖动机器人或规划轨迹，观察是否正常执行
+       ========================================================= -->
+
+  <!-- 参数：是否启动 RViz -->
+  <arg name="use_rviz" default="true" />
+
+  <!-- 参数：MoveIt 规划管道（ompl/chomp/stomp） -->
+  <arg name="pipeline" default="ompl" />
+
+  <!-- ========== 1. 启动 can_driver_node ========== -->
+  <!-- 包含完整的 URDF 加载、参数加载、控制器启动 -->
+  <include file="$(find can_driver)/launch/can_driver.launch" />
+
+  <!-- ========== 2. 加载 MoveIt 控制器配置 ========== -->
+  <!-- 告诉 MoveIt 如何连接到 arm_controller -->
+  <rosparam file="$(find can_driver)/config/moveit_controllers.yaml" />
+
+  <!-- ========== 3. 启动 MoveIt move_group ========== -->
+  <!-- 使用 HelloArm_moveit_config 的配置（因为都是 UR5） -->
+  <include file="$(find HelloArm_moveit_config)/launch/move_group.launch">
+    <!-- robot_description 已由 can_driver.launch 加载，不重复加载 -->
+    <arg name="load_robot_description" value="false" />
+
+    <!-- 使用 ros_control 作为控制器管理器（连接到 arm_controller） -->
+    <arg name="moveit_controller_manager" value="ros_control" />
+
+    <!-- 允许轨迹执行（否则 MoveIt 只能规划不能执行） -->
+    <arg name="allow_trajectory_execution" value="true" />
+
+    <!-- 规划管道 -->
+    <arg name="pipeline" value="$(arg pipeline)" />
+  </include>
+
+  <!-- ========== 4. 启动 RViz ========== -->
+  <include file="$(find HelloArm_moveit_config)/launch/moveit_rviz.launch" if="$(arg use_rviz)">
+    <arg name="rviz_config" value="$(find HelloArm_moveit_config)/launch/moveit.rviz" />
+  </include>
+
+  <!-- ========== 提示信息 ========== -->
+  <node pkg="rostopic" type="rostopic" name="startup_info"
+        args="echo -p 'can_driver + MoveIt 已启动。在 RViz 中使用 MotionPlanning 插件测试轨迹规划。'"
+        output="screen" launch-prefix="bash -c 'sleep 3; '" />
+
+</launch>

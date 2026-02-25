@@ -39,49 +39,43 @@ can_driver_node:
       can_device: vcan0
       control_mode: velocity
 
-    # --- 机械臂关节 ---
+    # --- 机械臂关节（UR5 仿真测试用）---
     # 由 position_controllers/JointTrajectoryController 控制（见 ros_controllers.yaml）
     # 使用 PP 协议（EyouCan），CAN ID 范围 0x00~0xFF（即 motor_id 本身）
-    # 注意：MT 和 PP 的响应帧 ID 范围不重叠，can0/can1 可各自混用两种协议
+    # 注意：关节名必须与 UR5 URDF 完全一致，实物联调时改回实际关节名
 
-    - name: rotary_table        # 转台（第 1 轴）
+    - name: shoulder_pan_joint  # UR5 第 1 轴（肩部旋转）
       motor_id: 0x06
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position
 
-    - name: larger_arm          # 大臂（第 2 轴）
+    - name: shoulder_lift_joint # UR5 第 2 轴（肩部抬升）
       motor_id: 0x05
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position
 
-    - name: smaller_arm         # 小臂（第 3 轴）
+    - name: elbow_joint         # UR5 第 3 轴（肘部）
       motor_id: 0x13
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position
 
-    - name: wrist_x             # 腕部 X 轴（第 4 轴）
+    - name: wrist_1_joint       # UR5 第 4 轴（腕部 1）
       motor_id: 0x14
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position
 
-    - name: wrist_y             # 腕部 Y 轴（第 5 轴）
+    - name: wrist_2_joint       # UR5 第 5 轴（腕部 2）
       motor_id: 0x15
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position
 
-    - name: wrist_z             # 腕部 Z 轴（第 6 轴）
+    - name: wrist_3_joint       # UR5 第 6 轴（腕部 3）
       motor_id: 0x16
-      protocol: PP
-      can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
-      control_mode: position
-
-    - name: actuator            # 末端执行器（夹爪/工具）
-      motor_id: 0x17
       protocol: PP
       can_device: vcan1         # 虚拟 CAN 接口（测试用），实物联调时改回 can1
       control_mode: position

@@ -3,8 +3,16 @@
 #include <ros/ros.h>
 #include <xmlrpcpp/XmlRpcValue.h>
 
+#include <cmath>
 #include <stdexcept>
 #include <string>
+
+// ---------------------------------------------------------------------------
+// 软件回环模式开关（用于测试 ros_control <-> MoveIt 集成）
+// ---------------------------------------------------------------------------
+// 启用后：read() 直接返回 write() 写入的命令值，模拟完美响应的电机
+// 禁用后：read() 从 CAN 总线读取真实反馈
+#define SOFTWARE_LOOPBACK_MODE 1
 
 // ---------------------------------------------------------------------------
 // 析构
@@ -108,6 +116,23 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         }
     }
 
+    // --- vcan 仿真模式：初始化关节位置为非零姿态（避免 JointTrajectoryController 拉回零位）---
+    // UR5 home 姿态（从 HelloArm_moveit_config/config/ur5_robot.srdf 读取）
+    std::map<std::string, double> ur5HomePos = {
+        {"shoulder_pan_joint",  0.0},
+        {"shoulder_lift_joint", -2.8497},
+        {"elbow_joint",          2.3862},
+        {"wrist_1_joint",       -1.545},
+        {"wrist_2_joint",        0.0},
+        {"wrist_3_joint",        0.0}
+    };
+    for (auto &jc : joints_) {
+        if (jc.canDevice.find("vcan") == 0 && ur5HomePos.count(jc.name)) {
+            jc.pos = ur5HomePos[jc.name];
+            jc.posCmd = jc.pos;  // 命令缓存也初始化为同样的值
+        }
+    }
+
     // --- 注册 ros_control 接口 ---
     for (auto &jc : joints_) {
         hardware_interface::JointStateHandle stateHandle(
@@ -187,8 +212,37 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 // ---------------------------------------------------------------------------
 // read
 // ---------------------------------------------------------------------------
-void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*period*/)
+void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration &period)
 {
+#if SOFTWARE_LOOPBACK_MODE
+    // ========== 软件回环模式（平滑插值版本）==========
+    // 模拟真实电机的响应特性：位置以有限速度向命令值靠近
+    // 用于测试 ros_control <-> MoveIt 集成，无需真实 CAN 硬件
+
+    // 模拟电机最大速度（rad/s），可根据实际电机调整
+    const double MAX_VELOCITY = 2.0;  // 约 115 度/秒
+
+    for (auto &jc : joints_) {
+        // 计算位置误差
+        double error = jc.posCmd - jc.pos;
+
+        // 限制单步最大移动量（速度限制）
+        double maxStep = MAX_VELOCITY * period.toSec();
+
+        if (std::abs(error) > maxStep) {
+            // 误差较大，按最大速度移动
+            jc.pos += (error > 0 ? maxStep : -maxStep);
+            jc.vel = (error > 0 ? MAX_VELOCITY : -MAX_VELOCITY);
+        } else {
+            // 误差较小，直接到达目标
+            jc.pos = jc.posCmd;
+            jc.vel = 0.0;
+        }
+
+        jc.eff = 0.0;  // 力矩设为 0
+    }
+#else
+    // ========== 真实 CAN 模式 ==========
     for (auto &jc : joints_) {
         auto *proto = getProtocol(jc.canDevice, jc.protocol);
         if (!proto) continue;
@@ -197,6 +251,7 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
         jc.vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
         jc.eff = static_cast<double>(proto->getCurrent(jc.motorId));
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -204,6 +259,14 @@ void CanDriverHW::read(const ros::Time & /*time*/, const ros::Duration & /*perio
 // ---------------------------------------------------------------------------
 void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration & /*period*/)
 {
+#if SOFTWARE_LOOPBACK_MODE
+    // ========== 软件回环模式 ==========
+    // 不发送 CAN 帧，命令值已经在 write() 被 ros_control 写入 posCmd/velCmd
+    // read() 会直接读取这些值作为反馈
+    // (可选：打印日志用于调试)
+    // ROS_INFO_THROTTLE(1.0, "[Loopback] posCmd[0] = %.3f", joints_[0].posCmd);
+#else
+    // ========== 真实 CAN 模式 ==========
     for (auto &jc : joints_) {
         auto *proto = getProtocol(jc.canDevice, jc.protocol);
         if (!proto) continue;
@@ -216,6 +279,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration & /*peri
                 static_cast<int32_t>(jc.posCmd / jc.positionScale));
         }
     }
+#endif
 }
 
 // ---------------------------------------------------------------------------

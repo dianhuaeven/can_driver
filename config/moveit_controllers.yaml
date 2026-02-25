@@ -1,0 +1,26 @@
+# =============================================================================
+# MoveIt 控制器配置（ros_control 模式）
+# =============================================================================
+# 本文件告诉 MoveIt 如何与 ros_control 控制器通信。
+# MoveIt 通过 follow_joint_trajectory action 接口向控制器发送轨迹。
+#
+# 数据流向：
+#   MoveIt move_group（规划器）
+#       ↓ FollowJointTrajectory action
+#   arm_controller (JointTrajectoryController)
+#       ↓ PositionJointInterface
+#   CanDriverHW::write()
+# =============================================================================
+
+controller_list:
+  - name: arm_controller
+    action_ns: follow_joint_trajectory
+    type: FollowJointTrajectory
+    default: true
+    joints:
+      - shoulder_pan_joint
+      - shoulder_lift_joint
+      - elbow_joint
+      - wrist_1_joint
+      - wrist_2_joint
+      - wrist_3_joint
