@@ -141,6 +141,7 @@ add_library(can_driver_transport
   src/MtCan.cpp
   src/EyouCan.cpp
   src/SocketCanController.cpp
+  src/SafeCommand.cpp
   src/CanDriverHW.cpp
 )
 add_dependencies(can_driver_transport ${${PROJECT_NAME}_EXPORTED_TARGETS} ${catkin_EXPORTED_TARGETS})

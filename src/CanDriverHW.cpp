@@ -1,4 +1,5 @@
 #include "can_driver/CanDriverHW.h"
+#include "can_driver/SafeCommand.h"
 
 #include <algorithm>
 #include <ros/ros.h>
@@ -522,28 +523,8 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             cmdValue = clampWithJointLimits(jc, cmdValue);
             const double scale =
                 (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
-            if (!std::isfinite(cmdValue) || !std::isfinite(scale) || scale <= 0.0) {
-                ROS_ERROR_THROTTLE(1.0,
-                                   "[CanDriverHW] Invalid command/scale for joint '%s' "
-                                   "(cmd=%g, scale=%g).",
-                                   jc.name.c_str(), cmdValue, scale);
-                cmd.valid = false;
-            } else {
-                const double raw = cmdValue / scale;
-                if (!std::isfinite(raw)) {
-                    ROS_ERROR_THROTTLE(1.0,
-                                       "[CanDriverHW] Non-finite raw command for joint '%s' "
-                                       "(cmd=%g, scale=%g).",
-                                       jc.name.c_str(), cmdValue, scale);
-                    cmd.valid = false;
-                } else {
-                    const double clampedRaw = std::max(
-                        static_cast<double>(std::numeric_limits<int32_t>::min()),
-                        std::min(static_cast<double>(std::numeric_limits<int32_t>::max()), raw));
-                    cmd.rawValue = static_cast<int32_t>(std::llround(clampedRaw));
-                    cmd.valid = true;
-                }
-            }
+            cmd.valid = can_driver::safe_command::scaleAndClampToInt32(
+                cmdValue, scale, jc.name, cmd.rawValue);
             commands.push_back(cmd);
         }
     }
@@ -710,30 +691,11 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
             msg.motor_id = static_cast<uint16_t>(jc.motorId);
             msg.name     = jc.name;
 
-            const auto clampToInt32 = [](double v) -> int32_t {
-                if (!std::isfinite(v)) {
-                    return 0;
-                }
-                const double c = std::max(
-                    static_cast<double>(std::numeric_limits<int32_t>::min()),
-                    std::min(static_cast<double>(std::numeric_limits<int32_t>::max()), v));
-                return static_cast<int32_t>(std::llround(c));
-            };
-            const auto clampToInt16 = [](double v) -> int16_t {
-                if (!std::isfinite(v)) {
-                    return 0;
-                }
-                const double c = std::max(
-                    static_cast<double>(std::numeric_limits<int16_t>::min()),
-                    std::min(static_cast<double>(std::numeric_limits<int16_t>::max()), v));
-                return static_cast<int16_t>(std::lround(c));
-            };
-
             const double rawPos = jc.pos / jc.positionScale;
             const double rawVel = jc.vel / jc.velocityScale;
-            msg.position = clampToInt32(rawPos);
-            msg.velocity = clampToInt16(rawVel);
-            msg.current  = clampToInt16(jc.eff);
+            msg.position = can_driver::safe_command::clampToInt32(rawPos);
+            msg.velocity = can_driver::safe_command::clampToInt16(rawVel);
+            msg.current  = can_driver::safe_command::clampToInt16(jc.eff);
 
             if (jc.controlMode == "velocity")
                 msg.mode = can_driver::MotorState::MODE_VELOCITY;
