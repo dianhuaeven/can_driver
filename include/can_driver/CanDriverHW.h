@@ -164,6 +164,8 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();
     void setupRosComm(ros::NodeHandle &pnh);
+    void clearDirectCmd(const std::string &jointName);
+    const JointConfig *findJointByMotorId(uint16_t motorId) const;
 
     enum class MotorOpStatus {
         Ok,
