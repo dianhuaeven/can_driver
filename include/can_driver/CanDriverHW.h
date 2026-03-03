@@ -142,6 +142,8 @@ private:
     mutable std::shared_mutex protocolMutex_;
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
+    double statePublishPeriodSec_{0.1};
+    int directCmdQueueSize_{1};
 
     // -----------------------------------------------------------------------
     // 内部辅助

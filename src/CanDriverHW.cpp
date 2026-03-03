@@ -97,6 +97,24 @@ bool CanDriverHW::loadDirectCommandConfig(const ros::NodeHandle &pnh)
                  directCmdTimeoutSec_);
         directCmdTimeoutSec_ = 0.5;
     }
+
+    if (!pnh.getParam("motor_state_period_sec", statePublishPeriodSec_)) {
+        statePublishPeriodSec_ = 0.1;
+    }
+    if (!std::isfinite(statePublishPeriodSec_) || statePublishPeriodSec_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid motor_state_period_sec=%.9g, fallback to 0.1s.",
+                 statePublishPeriodSec_);
+        statePublishPeriodSec_ = 0.1;
+    }
+
+    if (!pnh.getParam("direct_cmd_queue_size", directCmdQueueSize_)) {
+        directCmdQueueSize_ = 1;
+    }
+    if (directCmdQueueSize_ <= 0) {
+        ROS_WARN("[CanDriverHW] Invalid direct_cmd_queue_size=%d, fallback to 1.",
+                 directCmdQueueSize_);
+        directCmdQueueSize_ = 1;
+    }
     return true;
 }
 
@@ -319,7 +337,7 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
         const std::string posTopic = "motor/" + jc.name + "/cmd_position";
         const std::size_t idx = jointIndexByName_[jc.name];
         cmdVelSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            velTopic, 1,
+            velTopic, static_cast<uint32_t>(directCmdQueueSize_),
             [this, idx](const std_msgs::Float64::ConstPtr &msg) {
                 if (!active_.load(std::memory_order_acquire)) {
                     return;
@@ -331,7 +349,7 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
             });
 
         cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
-            posTopic, 1,
+            posTopic, static_cast<uint32_t>(directCmdQueueSize_),
             [this, idx](const std_msgs::Float64::ConstPtr &msg) {
                 if (!active_.load(std::memory_order_acquire)) {
                     return;
@@ -344,7 +362,7 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
     }
 
     motorStatesPub_ = pnh.advertise<can_driver::MotorState>("motor_states", 10);
-    stateTimer_ = pnh.createTimer(ros::Duration(0.1),
+    stateTimer_ = pnh.createTimer(ros::Duration(statePublishPeriodSec_),
                                   &CanDriverHW::publishMotorStates, this);
 }
 
