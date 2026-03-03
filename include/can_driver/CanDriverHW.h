@@ -91,6 +91,12 @@ private:
         double directVelCmd{0.0};
         bool   hasDirectPosCmd{false};
         bool   hasDirectVelCmd{false};
+        ros::Time lastDirectPosTime;
+        ros::Time lastDirectVelTime;
+
+        // 当前关节解析后的限位参数（用于 direct 命令钳制）
+        joint_limits_interface::JointLimits limits;
+        bool hasLimits{false};
     };
 
     std::deque<JointConfig> joints_;
@@ -134,6 +140,7 @@ private:
     std::atomic<bool> active_{false};
     mutable std::shared_mutex protocolMutex_;
     mutable std::mutex        jointStateMutex_;
+    double directCmdTimeoutSec_{0.5};
 
     // -----------------------------------------------------------------------
     // 内部辅助

@@ -69,6 +69,15 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         return false;
     }
 
+    if (!pnh.getParam("direct_cmd_timeout_sec", directCmdTimeoutSec_)) {
+        directCmdTimeoutSec_ = 0.5;
+    }
+    if (!std::isfinite(directCmdTimeoutSec_) || directCmdTimeoutSec_ < 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid direct_cmd_timeout_sec=%.9g, fallback to 0.5s.",
+                 directCmdTimeoutSec_);
+        directCmdTimeoutSec_ = 0.5;
+    }
+
     // 遍历 joint 配置
     for (int i = 0; i < jointList.size(); ++i) {
         XmlRpc::XmlRpcValue &jv = jointList[i];
@@ -229,6 +238,8 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
 
         // 3. 注册限位接口
         if (hasLimits) {
+            jc.limits = limits;
+            jc.hasLimits = true;
             if (jc.controlMode == "velocity") {
                 joint_limits_interface::VelocityJointSaturationHandle handle(
                     velIface_.getHandle(jc.name), limits);
@@ -281,6 +292,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
                 std::lock_guard<std::mutex> lock(jointStateMutex_);
                 joints_[idx].directVelCmd = msg->data;
                 joints_[idx].hasDirectVelCmd = true;
+                joints_[idx].lastDirectVelTime = ros::Time::now();
             });
 
         cmdPosSubs_[jc.name] = pnh.subscribe<std_msgs::Float64>(
@@ -292,6 +304,7 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
                 std::lock_guard<std::mutex> lock(jointStateMutex_);
                 joints_[idx].directPosCmd = msg->data;
                 joints_[idx].hasDirectPosCmd = true;
+                joints_[idx].lastDirectPosTime = ros::Time::now();
             });
     }
 
@@ -386,16 +399,59 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
 
     {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
-        for (const auto &jc : joints_) {
+        const ros::Time now = ros::Time::now();
+        const auto clampWithJointLimits = [](const JointConfig &jc, double cmdValue) -> double {
+            if (!jc.hasLimits || !std::isfinite(cmdValue)) {
+                return cmdValue;
+            }
+
+            if (jc.controlMode == "velocity" && jc.limits.has_velocity_limits) {
+                return std::clamp(cmdValue, -jc.limits.max_velocity, jc.limits.max_velocity);
+            }
+            if (jc.controlMode == "position" && jc.limits.has_position_limits) {
+                return std::clamp(cmdValue, jc.limits.min_position, jc.limits.max_position);
+            }
+            return cmdValue;
+        };
+
+        for (auto &jc : joints_) {
             JointCommand cmd;
             cmd.motorId = jc.motorId;
             cmd.protocol = jc.protocol;
             cmd.canDevice = jc.canDevice;
             cmd.controlMode = jc.controlMode;
-            const double cmdValue =
-                (jc.controlMode == "velocity")
-                    ? (jc.hasDirectVelCmd ? jc.directVelCmd : jc.velCmd)
-                    : (jc.hasDirectPosCmd ? jc.directPosCmd : jc.posCmd);
+
+            bool useDirect = false;
+            double cmdValue = 0.0;
+            if (jc.controlMode == "velocity") {
+                if (jc.hasDirectVelCmd) {
+                    const double age = (now - jc.lastDirectVelTime).toSec();
+                    if (age <= directCmdTimeoutSec_) {
+                        useDirect = true;
+                        cmdValue = jc.directVelCmd;
+                    } else {
+                        jc.hasDirectVelCmd = false;
+                    }
+                }
+                if (!useDirect) {
+                    cmdValue = jc.velCmd;
+                }
+            } else {
+                if (jc.hasDirectPosCmd) {
+                    const double age = (now - jc.lastDirectPosTime).toSec();
+                    if (age <= directCmdTimeoutSec_) {
+                        useDirect = true;
+                        cmdValue = jc.directPosCmd;
+                    } else {
+                        jc.hasDirectPosCmd = false;
+                    }
+                }
+                if (!useDirect) {
+                    cmdValue = jc.posCmd;
+                }
+            }
+
+            cmdValue = clampWithJointLimits(jc, cmdValue);
             const double scale =
                 (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
             if (!std::isfinite(cmdValue) || !std::isfinite(scale) || scale <= 0.0) {
