@@ -38,6 +38,10 @@ roslaunch can_driver can_driver.launch
 
 ## More Docs
 
-- `docs/ARCHITECTURE.md`
-- `docs/USAGE.md`
-- `docs/code_structure_refactor_report_2026-03-03.md`
+- `docs/文档导航.md`
+- `docs/架构设计.md`
+- `docs/使用指南.md`
+- `docs/CAN帧测试方案.md`
+- `docs/测试计划.md`
+- `docs/单电机控制说明.md`
+- `docs/归档/代码结构重构报告_2026-03-03.md`
