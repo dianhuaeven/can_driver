@@ -92,8 +92,11 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     });
 }
 
-void EyouCan::setMode(MotorID Id, MotorMode mode)
+bool EyouCan::setMode(MotorID Id, MotorMode mode)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -101,19 +104,24 @@ void EyouCan::setMode(MotorID Id, MotorMode mode)
     }
     const uint32_t modeValue = mode == MotorMode::Velocity ? 0x00000003 : 0x00000001;
     sendWriteCommand(motorId, 0x0F, modeValue, 4);
+    return true;
 }
 
-void EyouCan::setVelocity(MotorID Id, int32_t velocity)
+bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedVelocity = velocity;
     }
     sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4);
+    return true;
 }
 
-void EyouCan::setAcceleration(MotorID Id, int32_t acceleration)
+bool EyouCan::setAcceleration(MotorID Id, int32_t acceleration)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
@@ -121,51 +129,69 @@ void EyouCan::setAcceleration(MotorID Id, int32_t acceleration)
         motorStates[motorId].acceleration = acceleration;
     }
     // 原协议未定义加速度写入，保留数据以备后用
+    return true;
 }
 
-void EyouCan::setDeceleration(MotorID Id, int32_t deceleration)
+bool EyouCan::setDeceleration(MotorID Id, int32_t deceleration)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].deceleration = deceleration;
     }
+    return true;
 }
 
-void EyouCan::setPosition(MotorID Id, int32_t position)
+bool EyouCan::setPosition(MotorID Id, int32_t position)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedPosition = position;
     }
     sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4);
+    return true;
 }
 
-void EyouCan::Enable(MotorID Id)
+bool EyouCan::Enable(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = true;
     }
     sendWriteCommand(motorId, 0x10, 0x00000001, 4);
+    return true;
 }
 
-void EyouCan::Disable(MotorID Id)
+bool EyouCan::Disable(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = false;
     }
     sendWriteCommand(motorId, 0x10, 0x00000000, 4);
+    return true;
 }
 
-void EyouCan::Stop(MotorID Id)
+bool EyouCan::Stop(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     sendWriteCommand(motorId, 0x11, 0x00000000, 4);
+    return true;
 }
 
 int32_t EyouCan::getPosition(MotorID Id) const

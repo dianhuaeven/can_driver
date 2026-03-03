@@ -81,15 +81,19 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     });
 }
 
-void MtCan::setMode(MotorID Id, MotorMode mode)
+bool MtCan::setMode(MotorID Id, MotorMode mode)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     std::lock_guard<std::mutex> stateLock(stateMutex);
     motorStates[motorId].mode = mode;
+    return true;
 }
 
-void MtCan::setVelocity(MotorID Id, int32_t velocity)
+bool MtCan::setVelocity(MotorID Id, int32_t velocity)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -104,24 +108,30 @@ void MtCan::setVelocity(MotorID Id, int32_t velocity)
         static_cast<uint8_t>((velocity >> 24) & 0xFF)
     };
     sendFrame(canId, 0xA2, payload);
+    return true;
 }
 
-void MtCan::setAcceleration(MotorID Id, int32_t acceleration)
+bool MtCan::setAcceleration(MotorID Id, int32_t acceleration)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     (void)motorId;
     (void)acceleration; // 协议当前未支持
+    return true;
 }
 
-void MtCan::setDeceleration(MotorID Id, int32_t deceleration)
+bool MtCan::setDeceleration(MotorID Id, int32_t deceleration)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     (void)motorId;
     (void)deceleration; // 协议当前未支持
+    return true;
 }
 
-void MtCan::setPosition(MotorID Id, int32_t position)
+bool MtCan::setPosition(MotorID Id, int32_t position)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     int32_t commandedVelocity = 0;
     {
@@ -152,33 +162,45 @@ void MtCan::setPosition(MotorID Id, int32_t position)
     if (canController) {
         canController->send(frame);
     }
+    return true;
 }
 
-void MtCan::Enable(MotorID Id)
+bool MtCan::Enable(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = true;
     }
     setZeroPosition(motorId);
+    return true;
 }
 
-void MtCan::Disable(MotorID Id)
+bool MtCan::Disable(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = false;
     }
-    Stop(Id);
+    return Stop(Id);
 }
 
-void MtCan::Stop(MotorID Id)
+bool MtCan::Stop(MotorID Id)
 {
+    if (!canController) {
+        return false;
+    }
     uint8_t motorId = static_cast<uint8_t>(Id);
     const uint16_t canId = encodeSendCanId(motorId);
     sendFrame(canId, 0x81, {0, 0, 0, 0});
+    return true;
 }
 
 int32_t MtCan::getPosition(MotorID Id) const

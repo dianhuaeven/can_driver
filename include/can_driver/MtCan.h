@@ -24,42 +24,42 @@ public:
     /**
      * @brief 设置工作模式（目前仅记录状态，不发送额外命令）
      */
-    void setMode(MotorID motorId, MotorMode mode) override;
+    bool setMode(MotorID motorId, MotorMode mode) override;
 
     /**
      * @brief 设置目标速度（命令 0xA2）
      */
-    void setVelocity(MotorID motorId, int32_t velocity) override;
+    bool setVelocity(MotorID motorId, int32_t velocity) override;
 
     /**
      * @brief 设置加速度（协议未提供，暂忽略）
      */
-    void setAcceleration(MotorID motorId, int32_t acceleration) override;
+    bool setAcceleration(MotorID motorId, int32_t acceleration) override;
 
     /**
      * @brief 设置减速度（协议未提供，暂忽略）
      */
-    void setDeceleration(MotorID motorId, int32_t deceleration) override;
+    bool setDeceleration(MotorID motorId, int32_t deceleration) override;
 
     /**
      * @brief 位置控制命令（0xA4），同时携带最大速度
      */
-    void setPosition(MotorID motorId, int32_t position) override;
+    bool setPosition(MotorID motorId, int32_t position) override;
 
     /**
      * @brief 使能电机（发送零点命令）
      */
-    void Enable(MotorID motorId) override;
+    bool Enable(MotorID motorId) override;
 
     /**
      * @brief 失能电机（置位停机）
      */
-    void Disable(MotorID motorId) override;
+    bool Disable(MotorID motorId) override;
 
     /**
      * @brief 停止（0x81）
      */
-    void Stop(MotorID motorId) override;
+    bool Stop(MotorID motorId) override;
 
     /**
      * @brief 返回缓存的电机位置

@@ -217,3 +217,4 @@ rosservice call /controller_manager/list_controllers
 - `can_driver/docs/can_driver_plan_reliability.md`：可靠性路线图
 - `can_driver/docs/concurrency_safety_report.md`：并发安全修复报告
 - `can_driver/docs/non_concurrency_issues_report.md`：非并发问题记录
+- `can_driver/docs/p6_protocol_status_migration_report.md`：P6 接口升级修复过程报告

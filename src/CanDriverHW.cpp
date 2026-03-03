@@ -446,9 +446,17 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         std::lock_guard<std::mutex> devLock(*devMutex);
         try {
             if (cmd.controlMode == "velocity") {
-                proto->setVelocity(cmd.motorId, cmd.rawValue);
+                if (!proto->setVelocity(cmd.motorId, cmd.rawValue)) {
+                    ROS_WARN_THROTTLE(1.0,
+                                      "[CanDriverHW] setVelocity rejected on '%s'.",
+                                      cmd.canDevice.c_str());
+                }
             } else {
-                proto->setPosition(cmd.motorId, cmd.rawValue);
+                if (!proto->setPosition(cmd.motorId, cmd.rawValue)) {
+                    ROS_WARN_THROTTLE(1.0,
+                                      "[CanDriverHW] setPosition rejected on '%s'.",
+                                      cmd.canDevice.c_str());
+                }
             }
         } catch (const std::exception &e) {
             ROS_ERROR_THROTTLE(1.0, "[CanDriverHW] write() command failed on '%s': %s",
@@ -685,7 +693,9 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
             if (proto && devMutex) {
                 std::lock_guard<std::mutex> devLock(*devMutex);
                 try {
-                    proto->Enable(jc.motorId);
+                    if (!proto->Enable(jc.motorId)) {
+                        continue;
+                    }
                 } catch (const std::exception &e) {
                     ROS_ERROR("[CanDriverHW] Recover failed on '%s' motor %u: %s",
                               jc.canDevice.c_str(),
@@ -738,10 +748,18 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         try {
             switch (req.command) {
             case can_driver::MotorCommand::Request::CMD_ENABLE:
-                proto->Enable(jc.motorId);
+                if (!proto->Enable(jc.motorId)) {
+                    res.success = false;
+                    res.message = "Enable command rejected.";
+                    return true;
+                }
                 break;
             case can_driver::MotorCommand::Request::CMD_DISABLE:
-                proto->Disable(jc.motorId);
+                if (!proto->Disable(jc.motorId)) {
+                    res.success = false;
+                    res.message = "Disable command rejected.";
+                    return true;
+                }
                 {
                     std::lock_guard<std::mutex> stateLock(jointStateMutex_);
                     auto it = jointIndexByName_.find(jc.name);
@@ -752,7 +770,11 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
                 }
                 break;
             case can_driver::MotorCommand::Request::CMD_STOP:
-                proto->Stop(jc.motorId);
+                if (!proto->Stop(jc.motorId)) {
+                    res.success = false;
+                    res.message = "Stop command rejected.";
+                    return true;
+                }
                 {
                     std::lock_guard<std::mutex> stateLock(jointStateMutex_);
                     auto it = jointIndexByName_.find(jc.name);
@@ -771,7 +793,11 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
                 auto mode = (req.value == 0.0)
                                 ? CanProtocol::MotorMode::Position
                                 : CanProtocol::MotorMode::Velocity;
-                proto->setMode(jc.motorId, mode);
+                if (!proto->setMode(jc.motorId, mode)) {
+                    res.success = false;
+                    res.message = "Set mode command rejected.";
+                    return true;
+                }
                 break;
             }
             default:

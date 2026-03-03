@@ -25,44 +25,44 @@ public:
      * @brief 设置电机工作模式（位置/速度）
      * 对应原 PP 协议 0x0F 子命令
      */
-    void setMode(MotorID motorId, MotorMode mode) override;
+    bool setMode(MotorID motorId, MotorMode mode) override;
 
     /**
      * @brief 设置目标速度
      * 对应 PP 协议 0x09 子命令
      */
-    void setVelocity(MotorID motorId, int32_t velocity) override;
+    bool setVelocity(MotorID motorId, int32_t velocity) override;
 
     /**
      * @brief 设置加速度（目前仅缓存，协议未提供）
      */
-    void setAcceleration(MotorID motorId, int32_t acceleration) override;
+    bool setAcceleration(MotorID motorId, int32_t acceleration) override;
 
     /**
      * @brief 设置减速度（目前仅缓存，协议未提供）
      */
-    void setDeceleration(MotorID motorId, int32_t deceleration) override;
+    bool setDeceleration(MotorID motorId, int32_t deceleration) override;
 
     /**
      * @brief 设置目标位置
      * 对应 PP 协议 0x0A 子命令
      */
-    void setPosition(MotorID motorId, int32_t position) override;
+    bool setPosition(MotorID motorId, int32_t position) override;
 
     /**
      * @brief 下发使能命令（0x10 子命令）
      */
-    void Enable(MotorID motorId) override;
+    bool Enable(MotorID motorId) override;
 
     /**
      * @brief 下发失能命令（0x10，值为 0）
      */
-    void Disable(MotorID motorId) override;
+    bool Disable(MotorID motorId) override;
 
     /**
      * @brief 紧急停止（0x11）
      */
-    void Stop(MotorID motorId) override;
+    bool Stop(MotorID motorId) override;
 
     /**
      * @brief 读取/缓存电机位置（如无缓存则触发 0x07 读取）

@@ -30,7 +30,7 @@ public:
      *
      * 实现类应负责发送对应的指令并缓存当前模式，以便调用方读取。
      */
-    virtual void setMode(MotorID motorId, MotorMode mode) = 0;
+    virtual bool setMode(MotorID motorId, MotorMode mode) = 0;
 
     /**
      * @brief 设置目标速度
@@ -39,7 +39,7 @@ public:
      *
      * 上层只需给出逻辑速度值，具体缩放和单位转换由派生类处理。
      */
-    virtual void setVelocity(MotorID motorId, int32_t velocity) = 0;
+    virtual bool setVelocity(MotorID motorId, int32_t velocity) = 0;
 
     /**
      * @brief 设置目标加速度
@@ -48,14 +48,14 @@ public:
      *
      * 某些协议仅缓存该值而不实际下发命令，接口仍然定义以保持一致性。
      */
-    virtual void setAcceleration(MotorID motorId, int32_t acceleration) = 0;
+    virtual bool setAcceleration(MotorID motorId, int32_t acceleration) = 0;
 
     /**
      * @brief 设置目标减速度
      * @param motorId 目标电机 ID
      * @param deceleration 协议规定的减速度值
      */
-    virtual void setDeceleration(MotorID motorId, int32_t deceleration) = 0;
+    virtual bool setDeceleration(MotorID motorId, int32_t deceleration) = 0;
 
     /**
      * @brief 设置目标位置
@@ -64,7 +64,7 @@ public:
      *
      * 通常用于位置模式，速度模式可以选择忽略或复用该接口实现为位置跟随。
      */
-    virtual void setPosition(MotorID motorId, int32_t position) = 0;
+    virtual bool setPosition(MotorID motorId, int32_t position) = 0;
 
     /**
      * @brief 使能指定电机
@@ -72,7 +72,7 @@ public:
      *
      * 多数协议需要写入控制字或状态字，本接口不做具体约定。
      */
-    virtual void Enable(MotorID motorId) = 0;
+    virtual bool Enable(MotorID motorId) = 0;
 
     /**
      * @brief 失能指定电机
@@ -80,7 +80,7 @@ public:
      *
      * 常用于关闭驱动器输出或进入待机。
      */
-    virtual void Disable(MotorID motorId) = 0;
+    virtual bool Disable(MotorID motorId) = 0;
 
     /**
      * @brief 紧急停止
@@ -88,7 +88,7 @@ public:
      *
      * 若协议支持广播停机，可忽略 motorId 并一次性停止全部节点。
      */
-    virtual void Stop(MotorID motorId) = 0;
+    virtual bool Stop(MotorID motorId) = 0;
 
     /**
      * @brief 读取或返回缓存的实际位置
