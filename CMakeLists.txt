@@ -273,6 +273,46 @@ if(CATKIN_ENABLE_TESTING)
       )
     endif()
   endif()
+
+  catkin_add_gtest(test_device_manager
+    tests/test_device_manager.cpp
+  )
+  if(TARGET test_device_manager)
+    target_include_directories(test_device_manager PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_device_manager
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_device_manager
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_limits_enforcement
+    tests/test_limits_enforcement.cpp
+  )
+  if(TARGET test_limits_enforcement)
+    target_include_directories(test_limits_enforcement PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_limits_enforcement
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_limits_enforcement
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
 endif()
 
 ## Add folders to be run by python nosetests

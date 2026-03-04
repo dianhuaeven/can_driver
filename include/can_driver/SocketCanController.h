@@ -15,6 +15,8 @@
  * @brief Transport implementation backed by ros_canopen's socketcan_interface.
  */
 class SocketCanController : public CanTransport {
+    friend class SocketCanControllerTestAccessor;
+
 public:
     SocketCanController();
     explicit SocketCanController(can::ThreadedSocketCANInterfaceSharedPtr injectedInterface);
