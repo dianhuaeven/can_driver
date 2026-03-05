@@ -47,12 +47,12 @@ public:
     bool setPosition(MotorID motorId, int32_t position) override;
 
     /**
-     * @brief 使能电机（发送零点命令）
+     * @brief 标记电机进入可控状态（协议无独立使能命令）
      */
     bool Enable(MotorID motorId) override;
 
     /**
-     * @brief 失能电机（置位停机）
+     * @brief 关闭电机输出（0x80, Motor Off）
      */
     bool Disable(MotorID motorId) override;
 
@@ -84,9 +84,12 @@ public:
 private:
     struct MotorState {
         int32_t position = 0;
+        int64_t multiTurnAngle = 0;  ///< 0x92 多圈角度，单位 0.01°
         int16_t velocity = 0;
         double current = 0.0;
         int32_t commandedVelocity = 0;
+        int8_t temperature = 0;      ///< 温度（°C）
+        uint16_t encoderPosition = 0; ///< 单圈编码器位置
         bool enabled = false;
         bool error = false;
         MotorMode mode = MotorMode::Velocity;
@@ -117,6 +120,10 @@ private:
      * @brief 触发读错误命令（0x9A）
      */
     void requestError(uint8_t motorId) const;
+    /**
+     * @brief 触发读多圈角度命令（0x92）
+     */
+    void requestMultiTurnAngle(uint8_t motorId) const;
     /**
      * @brief 复位系统（0x76）
      */
