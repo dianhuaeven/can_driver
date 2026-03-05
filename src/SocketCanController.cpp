@@ -156,6 +156,7 @@ can::Frame SocketCanController::toSocketCanFrame(const CanTransport::Frame &fram
     socketFrame.is_extended = frame.isExtended ? 1 : 0;
     socketFrame.is_rtr = frame.isRemoteRequest ? 1 : 0;
     socketFrame.is_error = 0;
+    socketFrame.data.fill(0);
     // DLC 始终截断到 8 字节，避免越界复制。
     socketFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(socketFrame.data.size()));
     for (std::size_t i = 0; i < socketFrame.dlc; ++i) {
@@ -170,6 +171,7 @@ CanTransport::Frame SocketCanController::fromSocketCanFrame(const can::Frame &fr
     userFrame.id = frame.id;
     userFrame.isExtended = frame.is_extended != 0;
     userFrame.isRemoteRequest = frame.is_rtr != 0;
+    userFrame.data.fill(0);
     // 同样按 8 字节上限截断，保持对称转换。
     userFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(userFrame.data.size()));
     for (std::size_t i = 0; i < userFrame.dlc; ++i) {

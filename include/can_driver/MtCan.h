@@ -64,7 +64,7 @@ public:
     /**
      * @brief 返回缓存的电机位置
      */
-    int32_t getPosition(MotorID motorId) const override;
+    int64_t getPosition(MotorID motorId) const override;
 
     /**
      * @brief 返回电流（0x9C 返回的值，单位 0.01A）

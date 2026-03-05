@@ -15,6 +15,14 @@ constexpr uint8_t kReadCommand = 0x03;
 constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
+constexpr std::size_t kQueriesPerMotorPerCycle = 5;
+
+std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount)
+{
+    // 控制轮询发送频率，避免多电机场景下总线过载。
+    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
+    return std::chrono::milliseconds(intervalMs);
+}
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -63,9 +71,12 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     {
         std::lock_guard<std::mutex> lock(refreshMutex);
         refreshMotorIds.clear();
+        managedMotorIds.clear();
         refreshMotorIds.reserve(motorIds.size());
         for (MotorID id : motorIds) {
-            refreshMotorIds.push_back(static_cast<uint8_t>(id));
+            const auto motorId = static_cast<uint8_t>(id);
+            refreshMotorIds.push_back(motorId);
+            managedMotorIds.insert(motorId);
         }
     }
 
@@ -86,7 +97,12 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     refreshThread = std::thread([this]() {
         while (refreshLoopActive.load()) {
             refreshMotorStates();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::size_t motorCount = 0;
+            {
+                std::lock_guard<std::mutex> lock(refreshMutex);
+                motorCount = refreshMotorIds.size();
+            }
+            std::this_thread::sleep_for(computeRefreshSleep(motorCount));
         }
     });
 }
@@ -97,10 +113,7 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].mode = mode;
-    }
+    registerManagedMotorId(motorId);
     const uint32_t modeValue = mode == MotorMode::Velocity ? 0x00000003 : 0x00000001;
     sendWriteCommand(motorId, 0x0F, modeValue, 4);
     return true;
@@ -112,10 +125,7 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].commandedVelocity = velocity;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4);
     return true;
 }
@@ -127,10 +137,7 @@ bool EyouCan::setAcceleration(MotorID Id, int32_t acceleration)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].acceleration = acceleration;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x0B, static_cast<uint32_t>(acceleration), 4);
     return true;
 }
@@ -142,10 +149,7 @@ bool EyouCan::setDeceleration(MotorID Id, int32_t deceleration)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].deceleration = deceleration;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x0C, static_cast<uint32_t>(deceleration), 4);
     return true;
 }
@@ -156,10 +160,7 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].commandedPosition = position;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4);
     return true;
 }
@@ -170,10 +171,7 @@ bool EyouCan::Enable(MotorID Id)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].enabled = true;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x10, 0x00000001, 4);
     return true;
 }
@@ -184,10 +182,7 @@ bool EyouCan::Disable(MotorID Id)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
-    {
-        std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].enabled = false;
-    }
+    registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x10, 0x00000000, 4);
     return true;
 }
@@ -204,9 +199,10 @@ bool EyouCan::Stop(MotorID Id)
 }
 
 // [FIX #9] 移除 position==0 的不可靠判断，改用 hasReceived 标志
-int32_t EyouCan::getPosition(MotorID Id) const
+int64_t EyouCan::getPosition(MotorID Id) const
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -223,6 +219,7 @@ int32_t EyouCan::getPosition(MotorID Id) const
 int16_t EyouCan::getCurrent(MotorID Id) const
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -238,6 +235,7 @@ int16_t EyouCan::getCurrent(MotorID Id) const
 int16_t EyouCan::getVelocity(MotorID Id) const
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
@@ -309,16 +307,22 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
     }
 
     const uint16_t canId = static_cast<uint16_t>(frame.id & 0x7FF);
+    if (canId >= 0x100) {
+        return;
+    }
     const uint8_t motorId = static_cast<uint8_t>(canId & 0xFF);
-    if (canId != kEyouIdFrameBase + motorId) {
-        std::cerr << "[EyouCan] Ignore frame with CAN ID 0x"
-                  << std::hex << canId << " (expected 0x"
-                  << static_cast<int>(motorId) << ')' << std::dec << '\n';
+    if (canId != kEyouIdFrameBase + motorId || !isManagedMotorId(motorId)) {
         return;
     }
 
     const uint8_t responseType = frame.data[0];
     const uint8_t subCommand = frame.data[1];
+
+    bool resyncPosition = false;
+    bool resyncVelocity = false;
+    bool resyncMode = false;
+    bool resyncEnable = false;
+    bool resyncCurrent = false;
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -334,18 +338,27 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                           << " addr 0x" << std::hex << static_cast<int>(subCommand)
                           << " failed, state=0x" << static_cast<int>(writeState)
                           << std::dec << '\n';
-                // 写入失败时回滚本地状态
+                // 写入失败时触发主动重读，避免本地状态与设备状态漂移。
                 switch (subCommand) {
+                case 0x09:
+                    resyncVelocity = true;
+                    break;
+                case 0x0A:
+                    resyncPosition = true;
+                    break;
+                case 0x0F:
+                    resyncMode = true;
+                    break;
                 case 0x10:
-                    // Enable/Disable 写入失败，取反之前的乐观更新
-                    state.enabled = !state.enabled;
+                    resyncEnable = true;
+                    break;
+                case 0x15:
+                    resyncCurrent = true;
                     break;
                 default:
                     break;
                 }
             }
-            // 写入成功时不需要额外操作，因为 setMode/Enable/Disable 已乐观更新了状态
-
         } else if (responseType == kReadResponse) {
             // 读返回格式: 0x04 ADDR data0 data1 data2 data3
             // 32位数据从 data[2] 开始（即 DAT2~DAT5）
@@ -393,6 +406,37 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             }
         }
     }
+
+    if (resyncPosition) {
+        requestPosition(motorId);
+    }
+    if (resyncVelocity) {
+        requestVelocity(motorId);
+    }
+    if (resyncMode) {
+        requestMode(motorId);
+    }
+    if (resyncEnable) {
+        requestEnable(motorId);
+    }
+    if (resyncCurrent) {
+        requestCurrent(motorId);
+    }
+}
+
+bool EyouCan::isManagedMotorId(uint8_t motorId) const
+{
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    if (managedMotorIds.empty()) {
+        return true;
+    }
+    return managedMotorIds.find(motorId) != managedMotorIds.end();
+}
+
+void EyouCan::registerManagedMotorId(uint8_t motorId) const
+{
+    std::lock_guard<std::mutex> lock(refreshMutex);
+    managedMotorIds.insert(motorId);
 }
 
 void EyouCan::requestPosition(uint8_t motorId) const

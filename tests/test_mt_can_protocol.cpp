@@ -109,6 +109,20 @@ TEST_F(MtCanTest, SetPositionEncodesExpectedFrame)
     EXPECT_EQ(frame.data[7], static_cast<uint8_t>((kPosition >> 24) & 0xFF));
 }
 
+TEST_F(MtCanTest, SetPositionWithoutVelocityUsesDefaultSpeed)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x02);
+    constexpr int32_t kPosition = 0x01020304;
+
+    ASSERT_TRUE(mt.setPosition(kMotorId, kPosition));
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+
+    const auto &frame = transport->sentFrames[0];
+    EXPECT_EQ(frame.data[0], 0xA4);
+    EXPECT_EQ(frame.data[2], 100u);
+    EXPECT_EQ(frame.data[3], 0u);
+}
+
 TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 {
     // 响应 CAN ID=0x240+nodeId，nodeId=1 -> CAN ID 0x241。
@@ -150,6 +164,30 @@ TEST_F(MtCanTest, HandleResponseIgnoresExtendedFrame)
 
     EXPECT_EQ(mt.getCurrent(kResponseNodeId), 0);
     EXPECT_EQ(mt.getVelocity(kResponseNodeId), 0);
+}
+
+TEST_F(MtCanTest, GetPositionPreservesLargeMultiTurnAngle)
+{
+    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x01);
+
+    // 0x0000_8000_0000 (48-bit LE) = 2,147,483,648，超过 int32 上界。
+    CanTransport::Frame frame {};
+    frame.id = 0x241;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x92;
+    frame.data[1] = 0x00;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x00;
+    frame.data[5] = 0x80;
+    frame.data[6] = 0x00;
+    frame.data[7] = 0x00;
+
+    transport->simulateReceive(frame);
+
+    EXPECT_EQ(mt.getPosition(kResponseNodeId), 2147483648LL);
 }
 
 TEST_F(MtCanTest, DISABLED_TODO_HandleResponseErrorCodeBranch)

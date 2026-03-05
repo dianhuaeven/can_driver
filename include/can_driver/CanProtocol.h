@@ -97,7 +97,7 @@ public:
      *
      * 没有实时数据时可主动触发一次读取，并在读取完成后更新缓存。
      */
-    [[nodiscard]] virtual int32_t getPosition(MotorID motorId) const = 0;
+    [[nodiscard]] virtual int64_t getPosition(MotorID motorId) const = 0;
 
     /**
      * @brief 读取或返回缓存的实际电流

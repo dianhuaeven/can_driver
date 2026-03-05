@@ -4,6 +4,7 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <iomanip>
 #include <iostream>
@@ -11,6 +12,14 @@
 namespace {
 constexpr uint16_t kSendBaseId = 0x140;
 constexpr uint16_t kResponseBaseId = 0x240;
+constexpr int32_t kDefaultPositionSpeedDps = 100;
+constexpr std::size_t kQueriesPerMotorPerCycle = 2;
+
+std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount)
+{
+    const std::size_t intervalMs = std::max<std::size_t>(5, motorCount * kQueriesPerMotorPerCycle);
+    return std::chrono::milliseconds(intervalMs);
+}
 
 int16_t readInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -94,7 +103,12 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     refreshThread = std::thread([this]() {
         while (refreshLoopActive.load()) {
             refreshMotorStates();
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            std::size_t motorCount = 0;
+            {
+                std::lock_guard<std::mutex> lock(refreshMutex);
+                motorCount = refreshMotorIds.size();
+            }
+            std::this_thread::sleep_for(computeRefreshSleep(motorCount));
         }
     });
 }
@@ -161,8 +175,11 @@ bool MtCan::setPosition(MotorID Id, int32_t position)
     const uint16_t canId = encodeSendCanId(motorId);
 
     // 0xA4 DATA[2-3] = maxSpeed (uint16_t, 1dps/LSB)，取绝对值防止负数被误解读
-    const int32_t absVel = commandedVelocity < 0 ? -commandedVelocity : commandedVelocity;
-    const uint16_t maxSpeed = static_cast<uint16_t>(std::min<int32_t>(absVel, 0xFFFF));
+    std::int64_t absVel = std::llabs(static_cast<long long>(commandedVelocity));
+    if (absVel == 0) {
+        absVel = kDefaultPositionSpeedDps;
+    }
+    const uint16_t maxSpeed = static_cast<uint16_t>(std::min<std::int64_t>(absVel, 0xFFFF));
 
     CanTransport::Frame frame;
     frame.id = canId;
@@ -226,15 +243,14 @@ bool MtCan::Stop(MotorID Id)
 }
 
 // [FIX #5] 返回电机实际位置（从 0x92 多圈角度读回），而非命令值
-int32_t MtCan::getPosition(MotorID Id) const
+int64_t MtCan::getPosition(MotorID Id) const
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
         auto it = motorStates.find(motorId);
         if (it != motorStates.end()) {
-            // multiTurnAngle: 0.01°/LSB，直接返回（由上层按需转换单位）
-            return static_cast<int32_t>(it->second.multiTurnAngle);
+            return it->second.multiTurnAngle;
         }
     }
     requestMultiTurnAngle(motorId);

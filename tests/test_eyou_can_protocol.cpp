@@ -92,7 +92,7 @@ TEST_F(EyouCanTest, GetPositionWithoutCacheSendsReadRequest)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
 
-    const int32_t pos = eyou.getPosition(kMotorId);
+    const int64_t pos = eyou.getPosition(kMotorId);
 
     EXPECT_EQ(pos, 0);
     ASSERT_EQ(transport->sentFrames.size(), 1u);
@@ -144,6 +144,49 @@ TEST_F(EyouCanTest, HandleResponseIgnoresExtendedFrame)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(eyou.getPosition(static_cast<MotorID>(0x05)), 0);
+}
+
+TEST_F(EyouCanTest, HandleResponseIgnoresNonEyouCanIdRange)
+{
+    // 0x241 属于其他协议响应 ID，Eyou 应静默忽略。
+    CanTransport::Frame frame {};
+    frame.id = 0x241;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 6;
+    frame.data[0] = 0x04;
+    frame.data[1] = 0x07;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x03;
+    frame.data[5] = 0xE8;
+
+    transport->simulateReceive(frame);
+
+    EXPECT_EQ(eyou.getPosition(static_cast<MotorID>(0x41)), 0);
+}
+
+TEST_F(EyouCanTest, HandleResponseIgnoresUnmanagedMotorId)
+{
+    // 先注册受管电机 0x05，使过滤逻辑进入白名单模式。
+    ASSERT_TRUE(eyou.setPosition(static_cast<MotorID>(0x05), 123));
+    transport->clearSent();
+
+    CanTransport::Frame frame {};
+    frame.id = 0x0006;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 6;
+    frame.data[0] = 0x04;
+    frame.data[1] = 0x07;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x03;
+    frame.data[5] = 0xE8;
+
+    transport->simulateReceive(frame);
+
+    EXPECT_EQ(eyou.getPosition(static_cast<MotorID>(0x06)), 0);
 }
 
 TEST_F(EyouCanTest, DISABLED_TODO_HandleWriteAckModeAndEnable)

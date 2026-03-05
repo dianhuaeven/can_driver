@@ -7,6 +7,7 @@
 #include <mutex>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 class EyouCan : public CanProtocol {
@@ -67,7 +68,7 @@ public:
     /**
      * @brief 读取/缓存电机位置（如无缓存则触发 0x07 读取）
      */
-    int32_t getPosition(MotorID motorId) const override;
+    int64_t getPosition(MotorID motorId) const override;
 
     /**
      * @brief 返回缓存的实际电流（无缓存时触发 0x05 读取）
@@ -104,6 +105,7 @@ private:
     mutable std::mutex stateMutex;
     std::size_t receiveHandlerId = 0;
     std::vector<uint8_t> refreshMotorIds;
+    mutable std::unordered_set<uint8_t> managedMotorIds;
     mutable std::mutex refreshMutex;
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
@@ -125,6 +127,8 @@ private:
     void requestEnable(uint8_t motorId) const;
     void requestCurrent(uint8_t motorId) const;
     void requestVelocity(uint8_t motorId) const;
+    bool isManagedMotorId(uint8_t motorId) const;
+    void registerManagedMotorId(uint8_t motorId) const;
     void refreshMotorStates();
     void stopRefreshLoop();
 };
