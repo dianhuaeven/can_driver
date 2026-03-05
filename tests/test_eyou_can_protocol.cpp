@@ -76,13 +76,16 @@ TEST_F(EyouCanTest, SetPositionEncodesExpectedWriteFrame)
     EXPECT_EQ(frame.id, 0x0005u);
     EXPECT_FALSE(frame.isExtended);
     EXPECT_FALSE(frame.isRemoteRequest);
-    EXPECT_EQ(frame.dlc, 6u);
+    // 新协议实现统一输出 8 字节帧，尾部用 0 填充。
+    EXPECT_EQ(frame.dlc, 8u);
     EXPECT_EQ(frame.data[0], 0x01); // write
     EXPECT_EQ(frame.data[1], 0x0A); // position sub-command
     EXPECT_EQ(frame.data[2], 0x01);
     EXPECT_EQ(frame.data[3], 0x02);
     EXPECT_EQ(frame.data[4], 0x03);
     EXPECT_EQ(frame.data[5], 0x04);
+    EXPECT_EQ(frame.data[6], 0x00);
+    EXPECT_EQ(frame.data[7], 0x00);
 }
 
 TEST_F(EyouCanTest, GetPositionWithoutCacheSendsReadRequest)
@@ -96,9 +99,11 @@ TEST_F(EyouCanTest, GetPositionWithoutCacheSendsReadRequest)
     const auto &frame = transport->sentFrames[0];
     // 首次读取位置应主动发起寄存器读取（0x03/0x07）。
     EXPECT_EQ(frame.id, 0x0005u);
-    EXPECT_EQ(frame.dlc, 2u);
+    EXPECT_EQ(frame.dlc, 8u);
     EXPECT_EQ(frame.data[0], 0x03); // read
     EXPECT_EQ(frame.data[1], 0x07); // position register
+    EXPECT_EQ(frame.data[2], 0x00);
+    EXPECT_EQ(frame.data[7], 0x00);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

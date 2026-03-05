@@ -111,7 +111,8 @@ TEST_F(MtCanTest, SetPositionEncodesExpectedFrame)
 
 TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 {
-    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x41);
+    // 响应 CAN ID=0x240+nodeId，nodeId=1 -> CAN ID 0x241。
+    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x01);
 
     // 0x9C 状态反馈帧：电流/速度等状态由协议层解码后更新缓存。
     CanTransport::Frame frame {};
@@ -133,7 +134,7 @@ TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 
 TEST_F(MtCanTest, HandleResponseIgnoresExtendedFrame)
 {
-    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x41);
+    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x01);
 
     CanTransport::Frame frame {};
     frame.id = 0x241;
