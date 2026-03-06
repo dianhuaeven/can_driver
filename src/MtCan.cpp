@@ -13,7 +13,7 @@ namespace {
 constexpr uint16_t kSendBaseId = 0x140;
 constexpr uint16_t kResponseBaseId = 0x240;
 constexpr int32_t kDefaultPositionSpeedDps = 100;
-constexpr std::size_t kQueriesPerMotorPerCycle = 2;
+constexpr std::size_t kQueriesPerMotorPerCycle = 3;
 
 std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount)
 {
@@ -92,6 +92,8 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     }
 
     if (refreshLoopActive.load()) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        broadcastCommunicationTimeout(300);
         return;
     }
 
@@ -111,6 +113,10 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
             std::this_thread::sleep_for(computeRefreshSleep(motorCount));
         }
     });
+
+    // 电机注册后自动下发通讯中断保护，避免控制链路异常时失控
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    broadcastCommunicationTimeout(300);
 }
 
 bool MtCan::setMode(MotorID Id, MotorMode mode)
@@ -144,18 +150,104 @@ bool MtCan::setVelocity(MotorID Id, int32_t velocity)
 
 bool MtCan::setAcceleration(MotorID Id, int32_t acceleration)
 {
-    (void)Id;
-    (void)acceleration;
-    // 脉塔协议通过 0x43 命令+索引设置加减速度，
-    // 当前接口未实现，保留占位。
-    return true;
+    if (acceleration <= 0) {
+        acceleration = 100;
+    }
+    return setSpeedAcceleration(Id, static_cast<uint32_t>(acceleration));
 }
 
 bool MtCan::setDeceleration(MotorID Id, int32_t deceleration)
 {
-    (void)Id;
-    (void)deceleration;
+    if (deceleration <= 0) {
+        deceleration = 100;
+    }
+    return setSpeedDeceleration(Id, static_cast<uint32_t>(deceleration));
+}
+
+bool MtCan::setCommunicationTimeout(uint32_t timeoutMs)
+{
+    if (!canController) {
+        return false;
+    }
+
+    std::vector<uint8_t> motorIds;
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        motorIds = refreshMotorIds;
+    }
+    if (motorIds.empty()) {
+        std::cerr << "[MtCan] setCommunicationTimeout: no motors registered\n";
+        return false;
+    }
+
+    for (uint8_t motorId : motorIds) {
+        const uint16_t canId = encodeSendCanId(motorId);
+        CanTransport::Frame frame;
+        frame.id = canId;
+        frame.dlc = 8;
+        frame.isExtended = false;
+        frame.isRemoteRequest = false;
+        frame.data.fill(0);
+        frame.data[0] = 0xB3;
+        frame.data[4] = static_cast<uint8_t>(timeoutMs & 0xFF);
+        frame.data[5] = static_cast<uint8_t>((timeoutMs >> 8) & 0xFF);
+        frame.data[6] = static_cast<uint8_t>((timeoutMs >> 16) & 0xFF);
+        frame.data[7] = static_cast<uint8_t>((timeoutMs >> 24) & 0xFF);
+        canController->send(frame);
+    }
+
+    std::cout << "[MtCan] Communication timeout set to " << timeoutMs
+              << " ms for " << motorIds.size() << " motor(s)\n";
     return true;
+}
+
+bool MtCan::writeAcceleration(uint8_t motorId, uint8_t index, uint32_t value)
+{
+    if (!canController) {
+        return false;
+    }
+    value = std::max<uint32_t>(100, std::min<uint32_t>(60000, value));
+
+    const uint16_t canId = encodeSendCanId(motorId);
+    CanTransport::Frame frame;
+    frame.id = canId;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data.fill(0);
+    frame.data[0] = 0x43;
+    frame.data[1] = index;
+    frame.data[4] = static_cast<uint8_t>(value & 0xFF);
+    frame.data[5] = static_cast<uint8_t>((value >> 8) & 0xFF);
+    frame.data[6] = static_cast<uint8_t>((value >> 16) & 0xFF);
+    frame.data[7] = static_cast<uint8_t>((value >> 24) & 0xFF);
+    canController->send(frame);
+    return true;
+}
+
+bool MtCan::setSpeedAcceleration(MotorID id, uint32_t accelDpsPerSec)
+{
+    return writeAcceleration(static_cast<uint8_t>(id), 0x02, accelDpsPerSec);
+}
+
+bool MtCan::setSpeedDeceleration(MotorID id, uint32_t decelDpsPerSec)
+{
+    return writeAcceleration(static_cast<uint8_t>(id), 0x03, decelDpsPerSec);
+}
+
+bool MtCan::setPositionAcceleration(MotorID id, uint32_t accelDpsPerSec)
+{
+    return writeAcceleration(static_cast<uint8_t>(id), 0x00, accelDpsPerSec);
+}
+
+bool MtCan::setPositionDeceleration(MotorID id, uint32_t decelDpsPerSec)
+{
+    return writeAcceleration(static_cast<uint8_t>(id), 0x01, decelDpsPerSec);
+}
+
+void MtCan::broadcastCommunicationTimeout(uint32_t timeoutMs)
+{
+    (void)setCommunicationTimeout(timeoutMs);
 }
 
 bool MtCan::setPosition(MotorID Id, int32_t position)
@@ -415,6 +507,7 @@ void MtCan::refreshMotorStates()
         }
         requestState(motorId);            // 0x9C: 温度、电流、速度、编码器
         requestMultiTurnAngle(motorId);   // 0x92: 多圈角度（实际位置）
+        requestError(motorId);            // 0x9A: 错误标志
     }
 }
 
@@ -520,6 +613,39 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
         case 0x64:
             shouldResetAfterZero = true;
             break;
+
+        // ── 通讯中断保护设置应答 (0xB3) ────────
+        case 0xB3: {
+            if (frame.dlc >= 8) {
+                const uint32_t confirmedTimeout =
+                    static_cast<uint32_t>(frame.data[4]) |
+                    (static_cast<uint32_t>(frame.data[5]) << 8) |
+                    (static_cast<uint32_t>(frame.data[6]) << 16) |
+                    (static_cast<uint32_t>(frame.data[7]) << 24);
+                std::cout << "[MtCan] Motor " << static_cast<int>(nodeId)
+                          << " communication timeout confirmed: "
+                          << confirmedTimeout << " ms\n";
+            }
+            break;
+        }
+
+        // ── 加减速度设置应答 (0x43) ──────────
+        case 0x43: {
+            if (frame.dlc >= 8) {
+                const uint8_t accelIndex = frame.data[1];
+                const uint32_t confirmedAccel =
+                    static_cast<uint32_t>(frame.data[4]) |
+                    (static_cast<uint32_t>(frame.data[5]) << 8) |
+                    (static_cast<uint32_t>(frame.data[6]) << 16) |
+                    (static_cast<uint32_t>(frame.data[7]) << 24);
+                const char *names[] = {"pos_accel", "pos_decel", "spd_accel", "spd_decel"};
+                const char *name = (accelIndex <= 3) ? names[accelIndex] : "unknown";
+                std::cout << "[MtCan] Motor " << static_cast<int>(nodeId)
+                          << " " << name << " confirmed: "
+                          << confirmedAccel << " dps/s\n";
+            }
+            break;
+        }
 
         default:
             break;

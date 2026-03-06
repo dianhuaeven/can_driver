@@ -32,14 +32,39 @@ public:
     bool setVelocity(MotorID motorId, int32_t velocity) override;
 
     /**
-     * @brief 设置加速度（协议未提供，暂忽略）
+     * @brief 设置加速度（映射到 0x43 速度规划加速度）
      */
     bool setAcceleration(MotorID motorId, int32_t acceleration) override;
 
     /**
-     * @brief 设置减速度（协议未提供，暂忽略）
+     * @brief 设置减速度（映射到 0x43 速度规划减速度）
      */
     bool setDeceleration(MotorID motorId, int32_t deceleration) override;
+
+    /**
+     * @brief 设置通讯中断保护时间（0xB3）
+     */
+    bool setCommunicationTimeout(uint32_t timeoutMs);
+
+    /**
+     * @brief 设置速度规划加速度（0x43, index=0x02）
+     */
+    bool setSpeedAcceleration(MotorID id, uint32_t accelDpsPerSec);
+
+    /**
+     * @brief 设置速度规划减速度（0x43, index=0x03）
+     */
+    bool setSpeedDeceleration(MotorID id, uint32_t decelDpsPerSec);
+
+    /**
+     * @brief 设置位置规划加速度（0x43, index=0x00）
+     */
+    bool setPositionAcceleration(MotorID id, uint32_t accelDpsPerSec);
+
+    /**
+     * @brief 设置位置规划减速度（0x43, index=0x01）
+     */
+    bool setPositionDeceleration(MotorID id, uint32_t decelDpsPerSec);
 
     /**
      * @brief 位置控制命令（0xA4），同时携带最大速度
@@ -136,6 +161,14 @@ private:
     void setZeroPosition(uint8_t motorId) const;
     void refreshMotorStates();
     void stopRefreshLoop();
+    /**
+     * @brief 通用加减速写入（0x43）
+     */
+    bool writeAcceleration(uint8_t motorId, uint8_t index, uint32_t value);
+    /**
+     * @brief 广播通讯超时保护给所有已注册电机
+     */
+    void broadcastCommunicationTimeout(uint32_t timeoutMs);
     /**
      * @brief 解析 CAN 返回帧，更新缓存
      */
