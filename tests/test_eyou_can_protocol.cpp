@@ -88,6 +88,26 @@ TEST_F(EyouCanTest, SetPositionEncodesExpectedWriteFrame)
     EXPECT_EQ(frame.data[7], 0x00);
 }
 
+TEST_F(EyouCanTest, FastWriteModeUsesCmd05ForVelocityAndPosition)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+
+    eyou.setFastWriteEnabled(true);
+
+    ASSERT_TRUE(eyou.setVelocity(kMotorId, 123));
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+
+    transport->clearSent();
+    ASSERT_TRUE(eyou.setPosition(kMotorId, 456));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
+}
+
 TEST_F(EyouCanTest, GetPositionWithoutCacheSendsReadRequest)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);

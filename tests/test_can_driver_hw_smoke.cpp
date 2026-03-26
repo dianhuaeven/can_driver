@@ -53,12 +53,24 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         lastEnableMotor_ = motorId;
+        enabled_ = true;
         ++enableCalls_;
         return true;
     }
 
-    bool Disable(MotorID) override { return true; }
-    bool Stop(MotorID) override { return true; }
+    bool Disable(MotorID) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        enabled_ = false;
+        return true;
+    }
+
+    bool Stop(MotorID) override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++stopCalls_;
+        return true;
+    }
 
     int64_t getPosition(MotorID) const override { return 0; }
     int16_t getCurrent(MotorID) const override { return 0; }
@@ -95,6 +107,30 @@ public:
         return static_cast<uint16_t>(lastEnableMotor_);
     }
 
+    [[nodiscard]] bool isEnabled(MotorID) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return enabled_;
+    }
+
+    [[nodiscard]] bool hasFault(MotorID) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return hasFault_;
+    }
+
+    void setFault(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        hasFault_ = value;
+    }
+
+    int stopCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return stopCalls_;
+    }
+
 private:
     mutable std::mutex mutex_;
     MotorID lastModeMotor_{MotorID::LeftWheel};
@@ -111,6 +147,9 @@ private:
 
     MotorID lastEnableMotor_{MotorID::LeftWheel};
     int enableCalls_{0};
+    int stopCalls_{0};
+    bool enabled_{true};
+    bool hasFault_{false};
 };
 
 class FakeDeviceManager : public IDeviceManager {
@@ -132,6 +171,7 @@ public:
 
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
     void setRefreshRateHz(double) override {}
+    void setPpFastWriteEnabled(bool) override {}
     void shutdownAll() override {}
 
     std::shared_ptr<CanProtocol> getProtocol(const std::string &, CanType) const override
@@ -144,14 +184,25 @@ public:
         return mutex_;
     }
 
-    bool isDeviceReady(const std::string &) const override { return true; }
+    bool isDeviceReady(const std::string &) const override
+    {
+        std::lock_guard<std::mutex> lock(readyMutex_);
+        return ready_;
+    }
     std::size_t deviceCount() const override { return 1; }
 
     std::shared_ptr<FakeProtocol> protocol() const { return protocol_; }
+    void setReady(bool ready)
+    {
+        std::lock_guard<std::mutex> lock(readyMutex_);
+        ready_ = ready;
+    }
 
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
+    mutable std::mutex readyMutex_;
+    bool ready_{true};
 };
 
 class CanDriverHWSmokeTest : public ::testing::Test {
@@ -255,6 +306,104 @@ TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)
     EXPECT_TRUE(srv.response.success);
     EXPECT_EQ(fakeDm->protocol()->enableCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastEnableMotor(), 0x141u);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, WriteAutoStopOnFaultAndBlockMotion)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_fault"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("safety_stop_on_fault", true);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_wheel/cmd_velocity");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    std_msgs::Float64 msg;
+    msg.data = 2.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    fakeDm->protocol()->setFault(true);
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->stopCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 0);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_recover_hold"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("safety_stop_on_fault", false);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+    pnh.setParam("safety_hold_after_device_recover", true);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_wheel/cmd_velocity");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    std_msgs::Float64 msg;
+    msg.data = 1.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+
+    fakeDm->setReady(false);
+    msg.data = 3.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+
+    fakeDm->setReady(true);
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+
+    // 掉线期间积累的 direct 命令应被清空；恢复后需 fresh 命令才会再次下发。
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+
+    msg.data = 4.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 40);
 
     spinner.stop();
 }

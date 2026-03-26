@@ -38,6 +38,8 @@ public:
                       const std::vector<MotorID> &ids) override;
     /// 设置所有协议实例的状态轮询频率（Hz）；<=0 恢复协议默认策略。
     void setRefreshRateHz(double hz) override;
+    /// 设置 PP 协议是否使用快写命令（CMD=0x05）。
+    void setPpFastWriteEnabled(bool enabled) override;
     /// 停止并释放所有设备资源。
     void shutdownAll() override;
 
@@ -59,6 +61,7 @@ private:
     std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    bool ppFastWriteEnabled_{false};
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。
     std::map<std::string, std::shared_ptr<std::mutex>> deviceCmdMutexes_;
 };

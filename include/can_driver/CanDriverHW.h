@@ -12,6 +12,7 @@
 #include <can_driver/MotorCommand.h>
 #include <can_driver/MotorState.h>
 #include <can_driver/Recover.h>
+#include <can_driver/SetZeroLimit.h>
 #include <can_driver/Shutdown.h>
 
 #include <hardware_interface/joint_command_interface.h>
@@ -98,6 +99,9 @@ private:
         // 当前关节解析后的限位参数（用于 direct 命令钳制）
         joint_limits_interface::JointLimits limits;
         bool hasLimits{false};
+
+        // 安全状态：故障时是否已下发过 Stop（避免刷总线）。
+        bool stopIssuedOnFault{false};
     };
     struct DeviceProtocolGroup {
         std::string canDevice;
@@ -110,6 +114,7 @@ private:
     std::vector<DeviceProtocolGroup> jointGroups_;
     std::vector<int32_t>             rawCommandBuffer_;
     std::vector<uint8_t>             commandValidBuffer_;
+    std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
 
     std::shared_ptr<IDeviceManager> deviceManager_;
 
@@ -131,6 +136,7 @@ private:
     ros::ServiceServer shutdownSrv_;
     ros::ServiceServer recoverSrv_;
     ros::ServiceServer motorCmdSrv_;
+    ros::ServiceServer setZeroLimitSrv_;
 
     // 直接命令订阅者（per joint，绕过控制器，测试/调试用）
     std::map<std::string, ros::Subscriber> cmdVelSubs_;
@@ -147,6 +153,13 @@ private:
     double motorQueryHz_{0.0};
     int directCmdQueueSize_{1};
     bool debugBypassRosControl_{false};
+    bool ppFastWriteEnabled_{false};
+    double startupPositionSyncTimeoutSec_{1.0};
+    bool safetyStopOnFault_{true};
+    bool safetyRequireEnabledForMotion_{true};
+    double maxPositionStepRad_{0.0};
+    bool safetyHoldAfterDeviceRecover_{true};
+    std::map<std::string, bool> lastDeviceReadyState_;
 
     // -----------------------------------------------------------------------
     // 内部辅助
@@ -158,6 +171,7 @@ private:
     void registerJointInterfaces();
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();
+    bool syncStartupPositionAndCommands();
     void setupRosComm(ros::NodeHandle &pnh);
     void clearDirectCmd(const std::string &jointName);
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
@@ -200,6 +214,8 @@ private:
     bool onRecover(can_driver::Recover::Request &req, can_driver::Recover::Response &res);
     bool onMotorCommand(can_driver::MotorCommand::Request &req,
                         can_driver::MotorCommand::Response &res);
+    bool onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
+                        can_driver::SetZeroLimit::Response &res);
 };
 
 #endif // CAN_DRIVER_CAN_DRIVER_HW_H

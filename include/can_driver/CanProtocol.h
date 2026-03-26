@@ -132,6 +132,39 @@ public:
     }
 
     /**
+     * @brief 设置设备侧位置限位（物理限位）
+     * @param motorId 目标电机 ID
+     * @param minPositionRaw 下限（协议原始单位）
+     * @param maxPositionRaw 上限（协议原始单位）
+     * @param enable 是否使能设备侧限位
+     * @return 协议支持并发送成功返回 true，否则 false
+     */
+    virtual bool configurePositionLimits(MotorID motorId,
+                                         int32_t minPositionRaw,
+                                         int32_t maxPositionRaw,
+                                         bool enable)
+    {
+        (void)motorId;
+        (void)minPositionRaw;
+        (void)maxPositionRaw;
+        (void)enable;
+        return false;
+    }
+
+    /**
+     * @brief 设置位置零点偏置（协议原始单位）
+     * @param motorId 目标电机 ID
+     * @param offsetRaw 偏置值
+     * @return 协议支持并发送成功返回 true，否则 false
+     */
+    virtual bool setPositionOffset(MotorID motorId, int32_t offsetRaw)
+    {
+        (void)motorId;
+        (void)offsetRaw;
+        return false;
+    }
+
+    /**
      * @brief 初始化电机信息刷新机制
      * @param motorIds 需要周期刷新状态的电机 ID 列表
      *

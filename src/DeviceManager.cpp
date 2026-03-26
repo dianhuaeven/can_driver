@@ -42,7 +42,9 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
         }
     } else {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
-            eyouProtocols_[device] = std::make_shared<EyouCan>(transport);
+            auto eyou = std::make_shared<EyouCan>(transport);
+            eyou->setFastWriteEnabled(ppFastWriteEnabled_);
+            eyouProtocols_[device] = std::move(eyou);
         }
     }
     return true;
@@ -92,7 +94,9 @@ bool DeviceManager::initDevice(const std::string &device,
         mtProtocols_[device] = std::make_shared<MtCan>(transportIt->second);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
-        eyouProtocols_[device] = std::make_shared<EyouCan>(transportIt->second);
+        auto eyou = std::make_shared<EyouCan>(transportIt->second);
+        eyou->setFastWriteEnabled(ppFastWriteEnabled_);
+        eyouProtocols_[device] = std::move(eyou);
     }
     if (!mtIds.empty()) {
         mtProtocols_[device]->initializeMotorRefresh(mtIds);
@@ -138,6 +142,17 @@ void DeviceManager::setRefreshRateHz(double hz)
     for (auto &kv : eyouProtocols_) {
         if (kv.second) {
             kv.second->setRefreshRateHz(hz);
+        }
+    }
+}
+
+void DeviceManager::setPpFastWriteEnabled(bool enabled)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    ppFastWriteEnabled_ = enabled;
+    for (auto &kv : eyouProtocols_) {
+        if (kv.second) {
+            kv.second->setFastWriteEnabled(enabled);
         }
     }
 }

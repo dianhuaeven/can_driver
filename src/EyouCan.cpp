@@ -15,6 +15,7 @@
 
 namespace {
 constexpr uint8_t kWriteCommand = 0x01;
+constexpr uint8_t kFastWriteCommand = 0x05;
 constexpr uint8_t kReadCommand = 0x03;
 constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
@@ -143,6 +144,22 @@ void EyouCan::setRefreshRateHz(double hz)
     refreshRateHz_.store(hz, std::memory_order_relaxed);
 }
 
+void EyouCan::setFastWriteEnabled(bool enabled)
+{
+    fastWriteEnabled_.store(enabled, std::memory_order_relaxed);
+    publishWriteCountersParam();
+}
+
+uint64_t EyouCan::fastWriteSentCount() const
+{
+    return fastWriteSentCount_.load(std::memory_order_relaxed);
+}
+
+uint64_t EyouCan::normalWriteSentCount() const
+{
+    return normalWriteSentCount_.load(std::memory_order_relaxed);
+}
+
 bool EyouCan::setMode(MotorID Id, MotorMode mode)
 {
     if (!canController) {
@@ -162,7 +179,15 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
-    sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4);
+    const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
+    if (fastWrite) {
+        // 兼容策略：先发快写，再补发普通写。
+        // 某些固件对 0x05 的位置/速度寄存器写入不会触发运行，补发 0x01 保证生效。
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4, kFastWriteCommand);
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4, kWriteCommand);
+    } else {
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4, kWriteCommand);
+    }
     return true;
 }
 
@@ -197,7 +222,19 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
-    sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4);
+    const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
+    // 协议示例：先设置速度，再设置位置（位置模式需目标速度）
+    // 10 RPM = 10 * 65536 / 60 ≈ 10922.666，取 0x00002AAA
+    if (fastWrite) {
+        // 兼容策略：先发快写（满足“快写模式”），再补发普通写（确保动作触发）。
+        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kFastWriteCommand);
+        sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
+        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
+        sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kWriteCommand);
+    } else {
+        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
+        sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kWriteCommand);
+    }
     return true;
 }
 
@@ -301,7 +338,44 @@ bool EyouCan::hasFault(MotorID Id) const
     return (it != motorStates.end()) ? it->second.fault : false;
 }
 
-void EyouCan::sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t value, std::size_t payloadBytes)
+bool EyouCan::configurePositionLimits(MotorID Id,
+                                      int32_t minPositionRaw,
+                                      int32_t maxPositionRaw,
+                                      bool enable)
+{
+    if (!canController) {
+        return false;
+    }
+    if (minPositionRaw > maxPositionRaw) {
+        return false;
+    }
+
+    uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    // PP 协议：0x39 上限、0x3A 下限、0x38 限位使能
+    sendWriteCommand(motorId, 0x39, static_cast<uint32_t>(maxPositionRaw), 4, kWriteCommand);
+    sendWriteCommand(motorId, 0x3A, static_cast<uint32_t>(minPositionRaw), 4, kWriteCommand);
+    sendWriteCommand(motorId, 0x38, enable ? 0x00000001 : 0x00000000, 4, kWriteCommand);
+    return true;
+}
+
+bool EyouCan::setPositionOffset(MotorID Id, int32_t offsetRaw)
+{
+    if (!canController) {
+        return false;
+    }
+    uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    // PP 协议：0x3B 位置偏置参数
+    sendWriteCommand(motorId, 0x3B, static_cast<uint32_t>(offsetRaw), 4, kWriteCommand);
+    return true;
+}
+
+void EyouCan::sendWriteCommand(uint8_t motorId,
+                               uint8_t subCommand,
+                               uint32_t value,
+                               std::size_t payloadBytes,
+                               uint8_t commandType)
 {
     if (!canController) {
         std::cerr << "[EyouCan] CAN controller not initialized\n";
@@ -324,7 +398,7 @@ void EyouCan::sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t val
     frame.dlc = 8;
     frame.data.fill(0);
 
-    frame.data[0] = kWriteCommand;
+    frame.data[0] = commandType;
     frame.data[1] = subCommand;
 
     for (std::size_t i = 0; i < maxPayload; ++i) {
@@ -333,6 +407,27 @@ void EyouCan::sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t val
     }
 
     canController->send(frame);
+
+    if (commandType == kFastWriteCommand) {
+        fastWriteSentCount_.fetch_add(1, std::memory_order_relaxed);
+    } else if (commandType == kWriteCommand) {
+        normalWriteSentCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+
+    // 低频发布运行时计数，避免每帧写参数。
+    const uint64_t total = fastWriteSentCount_.load(std::memory_order_relaxed) +
+                           normalWriteSentCount_.load(std::memory_order_relaxed);
+    if (total % 20 == 0) {
+        publishWriteCountersParam();
+    }
+}
+
+void EyouCan::publishWriteCountersParam() const
+{
+    static ros::NodeHandle pnh("~");
+    pnh.setParam("pp_fast_write_enabled_runtime", fastWriteEnabled_.load(std::memory_order_relaxed));
+    pnh.setParam("pp_fast_write_sent_count", static_cast<double>(fastWriteSentCount_.load(std::memory_order_relaxed)));
+    pnh.setParam("pp_normal_write_sent_count", static_cast<double>(normalWriteSentCount_.load(std::memory_order_relaxed)));
 }
 
 void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand) const

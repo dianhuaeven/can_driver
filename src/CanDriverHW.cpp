@@ -2,10 +2,12 @@
 #include "can_driver/SafeCommand.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <set>
 #include <string>
+#include <thread>
 #include <xmlrpcpp/XmlRpcValue.h>
 
 CanDriverHW::CanDriverHW()
@@ -32,6 +34,7 @@ CanDriverHW::~CanDriverHW()
     shutdownSrv_.shutdown();
     recoverSrv_.shutdown();
     motorCmdSrv_.shutdown();
+    setZeroLimitSrv_.shutdown();
 }
 
 // ---------------------------------------------------------------------------
@@ -51,6 +54,10 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
     registerJointInterfaces();
     loadJointLimits(pnh);
     startMotorRefreshThreads();
+    if (!syncStartupPositionAndCommands()) {
+        resetInternalState();
+        return false;
+    }
     setupRosComm(pnh);
 
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
@@ -78,6 +85,8 @@ void CanDriverHW::resetInternalState()
     jointGroups_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
+    jointZeroOffsetRadByMotorId_.clear();
+    lastDeviceReadyState_.clear();
     deviceManager_->shutdownAll();
 }
 
@@ -122,12 +131,135 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     if (!pnh.getParam("debug_bypass_ros_control", debugBypassRosControl_)) {
         debugBypassRosControl_ = false;
     }
+    if (!pnh.getParam("startup_position_sync_timeout_sec", startupPositionSyncTimeoutSec_)) {
+        startupPositionSyncTimeoutSec_ = 1.0;
+    }
+    if (!std::isfinite(startupPositionSyncTimeoutSec_) || startupPositionSyncTimeoutSec_ < 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid startup_position_sync_timeout_sec=%.9g, fallback to 1.0s.",
+                 startupPositionSyncTimeoutSec_);
+        startupPositionSyncTimeoutSec_ = 1.0;
+    }
+    if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
+        ppFastWriteEnabled_ = false;
+    }
+    if (!pnh.getParam("safety_stop_on_fault", safetyStopOnFault_)) {
+        safetyStopOnFault_ = true;
+    }
+    if (!pnh.getParam("safety_require_enabled_for_motion", safetyRequireEnabledForMotion_)) {
+        safetyRequireEnabledForMotion_ = true;
+    }
+    if (!pnh.getParam("max_position_step_rad", maxPositionStepRad_)) {
+        maxPositionStepRad_ = 0.0;
+    }
+    if (!std::isfinite(maxPositionStepRad_) || maxPositionStepRad_ < 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid max_position_step_rad=%.9g, fallback to 0(disabled).",
+                 maxPositionStepRad_);
+        maxPositionStepRad_ = 0.0;
+    }
+    if (!pnh.getParam("safety_hold_after_device_recover", safetyHoldAfterDeviceRecover_)) {
+        safetyHoldAfterDeviceRecover_ = true;
+    }
+
+    deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
+
     if (motorQueryHz_ > 0.0) {
         ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
     }
+    ROS_INFO("[CanDriverHW] pp_fast_write_enabled=%s.",
+             ppFastWriteEnabled_ ? "true" : "false");
+    ROS_INFO("[CanDriverHW] startup_position_sync_timeout_sec=%.3f s.",
+             startupPositionSyncTimeoutSec_);
+    ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, max_position_step_rad=%.6f.",
+             safetyStopOnFault_ ? "true" : "false",
+             safetyRequireEnabledForMotion_ ? "true" : "false",
+             maxPositionStepRad_);
+    ROS_INFO("[CanDriverHW] safety_hold_after_device_recover=%s.",
+             safetyHoldAfterDeviceRecover_ ? "true" : "false");
     ROS_WARN_STREAM_COND(debugBypassRosControl_,
                          "[CanDriverHW] debug_bypass_ros_control=true: "
                          "direct topic commands will bypass ros_control fallback.");
+    return true;
+}
+
+bool CanDriverHW::syncStartupPositionAndCommands()
+{
+    struct JointSnapshot {
+        double pos{0.0};
+        double vel{0.0};
+        double eff{0.0};
+        bool valid{false};
+    };
+
+    std::vector<JointSnapshot> snapshots(joints_.size());
+
+    // 给协议刷新线程一个短暂窗口拉取首轮反馈。
+    const double timeout = startupPositionSyncTimeoutSec_;
+    const auto sleepDur = std::chrono::milliseconds(20);
+    const int maxPasses = std::max(1, static_cast<int>(std::ceil(timeout / 0.02)));
+
+    for (int pass = 0; pass < maxPasses; ++pass) {
+        for (const auto &group : jointGroups_) {
+            auto proto = getProtocol(group.canDevice, group.protocol);
+            auto devMutex = getDeviceMutex(group.canDevice);
+            if (!proto || !devMutex) {
+                continue;
+            }
+
+            std::lock_guard<std::mutex> devLock(*devMutex);
+            for (const std::size_t i : group.jointIndices) {
+                const auto &jc = joints_[i];
+                snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
+                snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
+                snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
+                snapshots[i].valid = true;
+            }
+        }
+        if (pass + 1 < maxPasses) {
+            std::this_thread::sleep_for(sleepDur);
+        }
+    }
+
+    bool startupOutOfRange = false;
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        for (std::size_t i = 0; i < joints_.size(); ++i) {
+            auto &jc = joints_[i];
+            if (snapshots[i].valid) {
+                jc.pos = snapshots[i].pos;
+                jc.vel = snapshots[i].vel;
+                jc.eff = snapshots[i].eff;
+            }
+
+            if (jc.controlMode == "position") {
+                // 上电后将位置命令对齐到当前反馈，避免控制循环首拍跳变。
+                jc.posCmd = jc.pos;
+                if (jc.hasLimits && jc.limits.has_position_limits) {
+                    if (jc.pos < jc.limits.min_position || jc.pos > jc.limits.max_position) {
+                        startupOutOfRange = true;
+                        ROS_ERROR("[CanDriverHW] Joint '%s' startup position %.6f rad out of limits [%.6f, %.6f].",
+                                  jc.name.c_str(),
+                                  jc.pos,
+                                  jc.limits.min_position,
+                                  jc.limits.max_position);
+                    }
+                }
+            } else {
+                // 速度关节上电默认零速度命令。
+                jc.velCmd = 0.0;
+            }
+
+            jc.hasDirectPosCmd = false;
+            jc.hasDirectVelCmd = false;
+            jc.stopIssuedOnFault = false;
+        }
+    }
+
+    if (startupOutOfRange) {
+        ROS_ERROR("[CanDriverHW] Startup position check failed. Refusing to activate to avoid limit violation.");
+        return false;
+    }
+
+    ROS_INFO("[CanDriverHW] Startup position sync finished.");
     return true;
 }
 
@@ -205,6 +337,7 @@ void CanDriverHW::rebuildJointGroups()
         group.protocol = entry.first.second;
         group.jointIndices = entry.second;
         jointGroups_.push_back(std::move(group));
+        lastDeviceReadyState_[entry.first.first] = false;
     }
 }
 
@@ -310,6 +443,9 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
     shutdownSrv_ = pnh.advertiseService("shutdown",      &CanDriverHW::onShutdown,     this);
     recoverSrv_  = pnh.advertiseService("recover",       &CanDriverHW::onRecover,      this);
     motorCmdSrv_ = pnh.advertiseService("motor_command", &CanDriverHW::onMotorCommand, this);
+    setZeroLimitSrv_ = pnh.advertiseService("set_zero_limit",
+                                            &CanDriverHW::onSetZeroLimit,
+                                            this);
 
     const auto makeDirectCmdCallback =
         [this](std::size_t idx, bool isVelocity) {
@@ -545,6 +681,25 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             }
 
             cmdValue = clampWithJointLimits(jc, cmdValue);
+            if (jc.controlMode == "position" && maxPositionStepRad_ > 0.0 &&
+                std::isfinite(cmdValue) && std::isfinite(jc.pos)) {
+                const double delta = cmdValue - jc.pos;
+                if (std::fabs(delta) > maxPositionStepRad_) {
+                    const double limitedCmd =
+                        jc.pos + std::copysign(maxPositionStepRad_, delta);
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "[CanDriverHW] Joint '%s' position step limited: cur=%.6f, req=%.6f, limited=%.6f (max_step=%.6f).",
+                        jc.name.c_str(),
+                        jc.pos,
+                        cmdValue,
+                        limitedCmd,
+                        maxPositionStepRad_);
+                    cmdValue = limitedCmd;
+                }
+                cmdValue = clampWithJointLimits(jc, cmdValue);
+            }
+
             const double scale =
                 (jc.controlMode == "velocity") ? jc.velocityScale : jc.positionScale;
             commandValidBuffer_[i] = static_cast<uint8_t>(
@@ -556,11 +711,64 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     for (const auto &group : jointGroups_) {
         const std::string &device = group.canDevice;
         const CanType protocol = group.protocol;
-        if (!isDeviceReady(device)) {
-            ROS_WARN_THROTTLE(1.0, "[CanDriverHW] Device '%s' not ready, skip command write.",
-                              device.c_str());
+        const bool isReady = isDeviceReady(device);
+        const auto stateIt = lastDeviceReadyState_.find(device);
+        const bool hadReadyState = (stateIt != lastDeviceReadyState_.end());
+        const bool wasReady = hadReadyState ? stateIt->second : false;
+        lastDeviceReadyState_[device] = isReady;
+
+        if (!isReady) {
+            if (!hadReadyState || wasReady) {
+                ROS_ERROR_THROTTLE(
+                    1.0,
+                    "[CanDriverHW] Device '%s' not ready, clear direct commands and block motion.",
+                    device.c_str());
+            } else {
+                ROS_WARN_THROTTLE(
+                    1.0,
+                    "[CanDriverHW] Device '%s' not ready, skip command write.",
+                    device.c_str());
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(jointStateMutex_);
+                for (const std::size_t idx : group.jointIndices) {
+                    auto &jc = joints_[idx];
+                    jc.hasDirectPosCmd = false;
+                    jc.hasDirectVelCmd = false;
+                    jc.stopIssuedOnFault = false;
+                    if (jc.controlMode == "position") {
+                        jc.posCmd = jc.pos;
+                    } else {
+                        jc.velCmd = 0.0;
+                    }
+                    commandValidBuffer_[idx] = 0;
+                }
+            }
             continue;
         }
+
+        if (safetyHoldAfterDeviceRecover_ && hadReadyState && !wasReady && isReady) {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[CanDriverHW] Device '%s' recovered, hold one cycle and require fresh command.",
+                device.c_str());
+            std::lock_guard<std::mutex> lock(jointStateMutex_);
+            for (const std::size_t idx : group.jointIndices) {
+                auto &jc = joints_[idx];
+                jc.hasDirectPosCmd = false;
+                jc.hasDirectVelCmd = false;
+                jc.stopIssuedOnFault = false;
+                if (jc.controlMode == "position") {
+                    jc.posCmd = jc.pos;
+                } else {
+                    jc.velCmd = 0.0;
+                }
+                commandValidBuffer_[idx] = 0;
+            }
+            continue;
+        }
+
         auto proto = getProtocol(device, protocol);
         auto devMutex = getDeviceMutex(device);
         if (!proto || !devMutex) {
@@ -574,6 +782,48 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             }
             const auto &jc = joints_[idx];
             try {
+                if (safetyStopOnFault_) {
+                    const bool hasFault = proto->hasFault(jc.motorId);
+                    bool needIssueStop = false;
+                    {
+                        std::lock_guard<std::mutex> lock(jointStateMutex_);
+                        if (hasFault) {
+                            if (!joints_[idx].stopIssuedOnFault) {
+                                joints_[idx].stopIssuedOnFault = true;
+                                needIssueStop = true;
+                            }
+                        } else {
+                            joints_[idx].stopIssuedOnFault = false;
+                        }
+                    }
+
+                    if (hasFault) {
+                        if (needIssueStop) {
+                            if (!proto->Stop(jc.motorId)) {
+                                ROS_WARN_THROTTLE(
+                                    1.0,
+                                    "[CanDriverHW] Joint '%s' has fault, auto Stop rejected on '%s'.",
+                                    jc.name.c_str(),
+                                    device.c_str());
+                            } else {
+                                ROS_WARN_THROTTLE(
+                                    1.0,
+                                    "[CanDriverHW] Joint '%s' has fault, auto Stop sent and motion command blocked.",
+                                    jc.name.c_str());
+                            }
+                        }
+                        continue;
+                    }
+                }
+
+                if (safetyRequireEnabledForMotion_ && !proto->isEnabled(jc.motorId)) {
+                    ROS_WARN_THROTTLE(
+                        1.0,
+                        "[CanDriverHW] Joint '%s' is not enabled, motion command blocked.",
+                        jc.name.c_str());
+                    continue;
+                }
+
                 if (jc.controlMode == "velocity") {
                     if (!proto->setVelocity(jc.motorId, rawCommandBuffer_[idx])) {
                         ROS_WARN_THROTTLE(1.0,
@@ -722,6 +972,7 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
         for (auto &jc : joints_) {
             jc.hasDirectPosCmd = false;
             jc.hasDirectVelCmd = false;
+            jc.stopIssuedOnFault = false;
         }
     }
 
@@ -889,5 +1140,148 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
 
     res.success = false;
     res.message = "Unknown command.";
+    return true;
+}
+
+bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
+                                 can_driver::SetZeroLimit::Response &res)
+{
+    if (!active_.load(std::memory_order_acquire)) {
+        res.success = false;
+        res.message = "Driver inactive.";
+        return true;
+    }
+
+    const JointConfig *target = findJointByMotorId(req.motor_id);
+    if (!target) {
+        res.success = false;
+        res.message = "Motor ID not found.";
+        return true;
+    }
+    if (target->controlMode != "position") {
+        res.success = false;
+        res.message = "Only position-control joints support zero/position limits.";
+        return true;
+    }
+
+    double baseMin = req.min_position_rad;
+    double baseMax = req.max_position_rad;
+    if (req.use_urdf_limits) {
+        urdf::Model urdf;
+        if (!urdf.initParam("robot_description")) {
+            res.success = false;
+            res.message = "robot_description not found; cannot read URDF limits.";
+            return true;
+        }
+        auto urdfJoint = urdf.getJoint(target->name);
+        if (!urdfJoint) {
+            res.success = false;
+            res.message = "Joint not found in URDF: " + target->name;
+            return true;
+        }
+        joint_limits_interface::JointLimits urdfLimits;
+        if (!joint_limits_interface::getJointLimits(urdfJoint, urdfLimits) ||
+            !urdfLimits.has_position_limits) {
+            res.success = false;
+            res.message = "URDF has no position limits for joint: " + target->name;
+            return true;
+        }
+        baseMin = urdfLimits.min_position;
+        baseMax = urdfLimits.max_position;
+    }
+
+    const double appliedMin = baseMin + req.zero_offset_rad;
+    const double appliedMax = baseMax + req.zero_offset_rad;
+    if (!std::isfinite(appliedMin) || !std::isfinite(appliedMax) || appliedMin >= appliedMax) {
+        res.success = false;
+        res.message = "Invalid limit range after zero offset.";
+        return true;
+    }
+
+    auto proto = getProtocol(target->canDevice, target->protocol);
+    auto devMutex = getDeviceMutex(target->canDevice);
+    if (!proto || !devMutex) {
+        res.success = false;
+        res.message = "Protocol not available.";
+        return true;
+    }
+
+    int64_t rawPos = 0;
+    {
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        // 连续读取几次，给协议层请求-返回留出时间。
+        for (int i = 0; i < 5; ++i) {
+            rawPos = proto->getPosition(target->motorId);
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+        }
+    }
+    const double currentPosRad = static_cast<double>(rawPos) * target->positionScale;
+    res.current_position_rad = currentPosRad;
+    if (currentPosRad < appliedMin || currentPosRad > appliedMax) {
+        res.success = false;
+        res.applied_min_rad = appliedMin;
+        res.applied_max_rad = appliedMax;
+        res.message = "Current position is outside requested limit range.";
+        return true;
+    }
+
+    if (req.apply_to_motor) {
+        int32_t rawMin = 0;
+        int32_t rawMax = 0;
+        int32_t rawOffset = 0;
+        if (!can_driver::safe_command::scaleAndClampToInt32(
+                appliedMin, target->positionScale, target->name + ".min_limit", rawMin) ||
+            !can_driver::safe_command::scaleAndClampToInt32(
+                appliedMax, target->positionScale, target->name + ".max_limit", rawMax) ||
+            !can_driver::safe_command::scaleAndClampToInt32(
+                req.zero_offset_rad, target->positionScale, target->name + ".zero_offset", rawOffset)) {
+            res.success = false;
+            res.message = "Failed to convert limits/offset to protocol raw values.";
+            return true;
+        }
+
+        const auto status = executeOnMotor(
+            *target,
+            [rawMin, rawMax, rawOffset](const std::shared_ptr<CanProtocol> &p, MotorID id) {
+                const bool okOffset = p->setPositionOffset(id, rawOffset);
+                const bool okLimits = p->configurePositionLimits(id, rawMin, rawMax, true);
+                return okOffset && okLimits;
+            },
+            "Set zero/position limits");
+
+        if (status != MotorOpStatus::Ok) {
+            res.success = false;
+            if (status == MotorOpStatus::DeviceNotReady) {
+                res.message = "CAN device not ready.";
+            } else if (status == MotorOpStatus::ProtocolUnavailable) {
+                res.message = "Protocol not available.";
+            } else if (status == MotorOpStatus::Rejected) {
+                res.message = "Protocol rejected zero/limit settings (or unsupported by this protocol).";
+            } else {
+                res.message = "Set zero/limit execution failed.";
+            }
+            return true;
+        }
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        for (auto &jc : joints_) {
+            if (static_cast<uint16_t>(jc.motorId) != req.motor_id) {
+                continue;
+            }
+            jc.hasLimits = true;
+            jc.limits.has_position_limits = true;
+            jc.limits.min_position = appliedMin;
+            jc.limits.max_position = appliedMax;
+            jointZeroOffsetRadByMotorId_[req.motor_id] = req.zero_offset_rad;
+            break;
+        }
+    }
+
+    res.success = true;
+    res.applied_min_rad = appliedMin;
+    res.applied_max_rad = appliedMax;
+    res.message = "OK";
     return true;
 }

@@ -17,7 +17,6 @@ find_package(catkin REQUIRED COMPONENTS
   joint_limits_interface
   message_generation
   roscpp
-  socketcan_interface
   std_msgs
   urdf
 )
@@ -68,6 +67,7 @@ add_service_files(
   Shutdown.srv
   Recover.srv
   MotorCommand.srv
+  SetZeroLimit.srv
 )
 
 ## Generate actions in the 'action' folder
@@ -116,7 +116,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES can_driver_transport
-  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp socketcan_interface std_msgs urdf
+  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp std_msgs urdf
 )
 
 # Enable testing
@@ -173,10 +173,10 @@ target_link_libraries(can_driver_node
 
 ## Mark executable scripts (Python etc.) for installation
 ## in contrast to setup.py, you can choose the destination
-# catkin_install_python(PROGRAMS
-#   scripts/my_python_script
-#   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+catkin_install_python(PROGRAMS
+  scripts/realtime_motor_ui.py
+  DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 ## Mark executables for installation
 ## See http://docs.ros.org/melodic/api/catkin/html/howto/format1/building_executables.html
