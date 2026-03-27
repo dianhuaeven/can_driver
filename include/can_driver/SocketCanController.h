@@ -3,23 +3,23 @@
 
 #include "can_driver/CanTransport.h"
 
-#include <socketcan_interface/socketcan.h>
+#include <linux/can.h>
 
 #include <atomic>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 /**
- * @brief Transport implementation backed by ros_canopen's socketcan_interface.
+ * @brief Transport implementation backed by Linux SocketCAN (PF_CAN/CAN_RAW).
  */
 class SocketCanController : public CanTransport {
     friend class SocketCanControllerTestAccessor;
 
 public:
     SocketCanController();
-    explicit SocketCanController(can::ThreadedSocketCANInterfaceSharedPtr injectedInterface);
     ~SocketCanController() override;
 
     /**
@@ -40,19 +40,18 @@ public:
     std::string device() const;
 
 private:
-    void handleFrame(const can::Frame &frame);
+    void receiveLoop();
     void dispatchReceive(const CanTransport::Frame &frame);
-    can::Frame toSocketCanFrame(const CanTransport::Frame &frame) const;
-    CanTransport::Frame fromSocketCanFrame(const can::Frame &frame) const;
-
-    can::ThreadedSocketCANInterfaceSharedPtr interface_;
-    can::CommInterface::FrameListenerConstSharedPtr frameListener_;
-    can::StateInterface::StateListenerConstSharedPtr stateListener_;
+    struct can_frame toLinuxCanFrame(const CanTransport::Frame &frame) const;
+    CanTransport::Frame fromLinuxCanFrame(const struct can_frame &frame) const;
 
     std::atomic<bool> initialized_{false};
+    std::atomic<bool> stopRequested_{false};
     std::atomic<std::size_t> nextHandlerId_{1};
     std::unordered_map<std::size_t, ReceiveHandler> handlers_;
     mutable std::mutex handlerMutex_;
+    std::thread receiveThread_;
+    int socketFd_{-1};
     std::string deviceName_;
 };
 

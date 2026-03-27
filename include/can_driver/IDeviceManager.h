@@ -24,6 +24,7 @@ public:
                               CanType type,
                               const std::vector<MotorID> &ids) = 0;
     virtual void setRefreshRateHz(double hz) = 0;
+    virtual void setPpFastWriteEnabled(bool enabled) = 0;
     virtual void shutdownAll() = 0;
 
     virtual std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const = 0;

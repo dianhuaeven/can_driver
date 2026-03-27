@@ -16,7 +16,7 @@ class MtCan : public CanProtocol {
 public:
     /**
      * @brief 构造函数
-     * @param controller 基于 socketcan_interface 的 CAN 传输实现
+        * @param controller 基于 CanTransport 的 CAN 传输实现
      */
     explicit MtCan(std::shared_ptr<CanTransport> controller);
 

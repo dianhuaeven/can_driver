@@ -1,11 +1,12 @@
 #include <gtest/gtest.h>
 #include <can_driver/SocketCanController.h>
+#include <linux/can.h>
 
 // 通过友元访问私有转换函数，直接验证协议层与 socketcan 帧的互转。
 class SocketCanControllerTestAccessor {
 public:
-  static can::Frame toSock(SocketCanController& c, const CanTransport::Frame& f){ return c.toSocketCanFrame(f); }
-  static CanTransport::Frame fromSock(SocketCanController& c, const can::Frame& f){ return c.fromSocketCanFrame(f); }
+  static can_frame toSock(SocketCanController& c, const CanTransport::Frame& f){ return c.toLinuxCanFrame(f); }
+  static CanTransport::Frame fromSock(SocketCanController& c, const can_frame& f){ return c.fromLinuxCanFrame(f); }
   static void dispatch(SocketCanController& c, const CanTransport::Frame& f){ c.dispatchReceive(f); }
 };
 
@@ -16,17 +17,17 @@ TEST(SocketCanController, EncodeDecodeRoundtripAndBounds){
   for(size_t i=0;i<f.data.size();++i) f.data[i]=static_cast<uint8_t>(i+1);
 
   auto sf = SocketCanControllerTestAccessor::toSock(ctrl,f);
-  EXPECT_EQ(sf.id,f.id);
-  EXPECT_EQ(sf.is_extended,1);
-  EXPECT_EQ(sf.is_rtr,0);
-  EXPECT_LE(sf.dlc,8);
-  for(size_t i=0;i<sf.dlc;++i) EXPECT_EQ(sf.data[i], f.data[i]);
+  EXPECT_EQ((sf.can_id & CAN_EFF_MASK),f.id);
+  EXPECT_NE((sf.can_id & CAN_EFF_FLAG),0u);
+  EXPECT_EQ((sf.can_id & CAN_RTR_FLAG),0u);
+  EXPECT_LE(sf.can_dlc,8);
+  for(size_t i=0;i<sf.can_dlc;++i) EXPECT_EQ(sf.data[i], f.data[i]);
 
   auto back = SocketCanControllerTestAccessor::fromSock(ctrl,sf);
   EXPECT_EQ(back.id,f.id);
   EXPECT_TRUE(back.isExtended);
   EXPECT_FALSE(back.isRemoteRequest);
-  EXPECT_EQ(back.dlc,sf.dlc);
+  EXPECT_EQ(back.dlc,sf.can_dlc);
   for(size_t i=0;i<back.dlc;++i) EXPECT_EQ(back.data[i], sf.data[i]);
 }
 

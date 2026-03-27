@@ -10,6 +10,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
+#include <cstdint>
 
 class EyouCan : public CanProtocol {
 
@@ -17,7 +18,7 @@ public:
 
     /**
      * @brief 构造函数
-     * @param controller 基于 socketcan_interface 的 CAN 传输实现（标准 8 字节帧）
+        * @param controller 基于 CanTransport 的 CAN 传输实现（标准 8 字节帧）
      */
     explicit EyouCan(std::shared_ptr<CanTransport> controller);
 
@@ -82,9 +83,18 @@ public:
     int16_t getVelocity(MotorID motorId) const override;
     bool isEnabled(MotorID motorId) const override;
     bool hasFault(MotorID motorId) const override;
+    bool configurePositionLimits(MotorID motorId,
+                                 int32_t minPositionRaw,
+                                 int32_t maxPositionRaw,
+                                 bool enable) override;
+    bool setPositionOffset(MotorID motorId, int32_t offsetRaw) override;
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
+    /// 设置是否启用 PP 快写命令（CMD=0x05）。
+    void setFastWriteEnabled(bool enabled);
+    uint64_t fastWriteSentCount() const;
+    uint64_t normalWriteSentCount() const;
 
 private:
     /**
@@ -116,11 +126,18 @@ private:
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
     std::atomic<double> refreshRateHz_{0.0};
+    std::atomic<bool> fastWriteEnabled_{false};
+    std::atomic<uint64_t> fastWriteSentCount_{0};
+    std::atomic<uint64_t> normalWriteSentCount_{0};
 
     /**
      * @brief 发送写指令帧（0x01）
      */
-    void sendWriteCommand(uint8_t motorId, uint8_t subCommand, uint32_t value, std::size_t payloadBytes);
+    void sendWriteCommand(uint8_t motorId,
+                          uint8_t subCommand,
+                          uint32_t value,
+                          std::size_t payloadBytes,
+                          uint8_t commandType = 0x01);
     /**
      * @brief 发送读指令帧（0x03）
      */
@@ -139,6 +156,7 @@ private:
     void refreshMotorStates();
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     void stopRefreshLoop();
+    void publishWriteCountersParam() const;
 };
 
 #endif // EyouCan_H

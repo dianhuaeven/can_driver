@@ -1,21 +1,18 @@
 #include "can_driver/SocketCanController.h"
 
 #include <ros/console.h>
-#include <socketcan_interface/threading.h>
-#include <socketcan_interface/settings.h>
+
+#include <errno.h>
+#include <linux/can/raw.h>
+#include <net/if.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #include <algorithm>
-#include <cstring>
-#include <functional>
 #include <vector>
 
 SocketCanController::SocketCanController()
-    : interface_(std::make_shared<can::ThreadedSocketCANInterface>())
-{
-}
-
-SocketCanController::SocketCanController(can::ThreadedSocketCANInterfaceSharedPtr injectedInterface)
-    : interface_(std::move(injectedInterface))
 {
 }
 
@@ -26,32 +23,41 @@ SocketCanController::~SocketCanController()
 
 bool SocketCanController::initialize(const std::string &device, bool loopback)
 {
-    // 允许重复初始化：先清理旧监听器和旧接口状态。
+    // 允许重复初始化：先清理旧 socket 和线程。
     shutdown();
 
-    if (!interface_) {
-        interface_ = std::make_shared<can::ThreadedSocketCANInterface>();
-    }
-
-    if (!interface_->init(device, loopback, can::NoSettings::create())) {
-        ROS_ERROR_STREAM("[SocketCanController] Failed to init device " << device);
+    const int fd = ::socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (fd < 0) {
+        ROS_ERROR_STREAM("[SocketCanController] Failed to create CAN socket for " << device
+                         << ": errno=" << errno);
         return false;
     }
 
-    // 注册帧回调，将 socketcan 帧统一转换后分发给上层协议。
-    frameListener_ = interface_->createMsgListener(
-        std::bind(&SocketCanController::handleFrame, this, std::placeholders::_1));
+    const int loopbackOpt = loopback ? 1 : 0;
+    if (::setsockopt(fd, SOL_CAN_RAW, CAN_RAW_LOOPBACK, &loopbackOpt, sizeof(loopbackOpt)) < 0) {
+        ROS_WARN_STREAM("[SocketCanController] Failed to set loopback option on " << device
+                        << ", errno=" << errno << ". Continue with system default.");
+    }
 
-    // 仅记录非 ready 状态，便于现场排障。
-    stateListener_ = interface_->createStateListener(
-        [device](const can::State &state) {
-            if (!state.isReady()) {
-                ROS_WARN_STREAM("[SocketCanController] Device " << device
-                                << " entered state " << state.driver_state
-                                << " error=" << state.error_code.message()
-                                << " internal=" << state.internal_error);
-            }
-        });
+    struct sockaddr_can addr {};
+    addr.can_family = AF_CAN;
+    addr.can_ifindex = static_cast<int>(::if_nametoindex(device.c_str()));
+    if (addr.can_ifindex == 0) {
+        ROS_ERROR_STREAM("[SocketCanController] Unknown CAN device " << device);
+        ::close(fd);
+        return false;
+    }
+
+    if (::bind(fd, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+        ROS_ERROR_STREAM("[SocketCanController] Failed to bind " << device
+                         << ": errno=" << errno);
+        ::close(fd);
+        return false;
+    }
+
+    socketFd_ = fd;
+    stopRequested_.store(false);
+    receiveThread_ = std::thread(&SocketCanController::receiveLoop, this);
 
     deviceName_ = device;
     initialized_.store(true);
@@ -60,13 +66,16 @@ bool SocketCanController::initialize(const std::string &device, bool loopback)
 
 void SocketCanController::shutdown()
 {
-    // 先关闭 initialized 标志，阻止并发 send 继续写入。
+    stopRequested_.store(true);
     initialized_.store(false);
-    frameListener_.reset();
-    stateListener_.reset();
 
-    if (interface_) {
-        interface_->shutdown();
+    if (receiveThread_.joinable()) {
+        receiveThread_.join();
+    }
+
+    if (socketFd_ >= 0) {
+        ::close(socketFd_);
+        socketFd_ = -1;
     }
 
     // handler ID 从 1 重新开始，便于测试中验证生命周期。
@@ -90,25 +99,16 @@ std::string SocketCanController::device() const
 
 void SocketCanController::send(const CanTransport::Frame &frame)
 {
-    // 未初始化时发送为 no-op，保持调用侧简单。
-    if (!initialized_.load() || !interface_) {
+    if (!initialized_.load() || socketFd_ < 0) {
         return;
     }
 
-    const can::Frame socketFrame = toSocketCanFrame(frame);
-    // frame 非法（如 DLC 超范围）时不上总线。
-    if (!socketFrame.isValid()) {
-        ROS_WARN_STREAM("[SocketCanController] Skip invalid frame for device " << deviceName_
-                        << " id=0x" << std::hex << socketFrame.id << std::dec
-                        << " dlc=" << static_cast<unsigned>(socketFrame.dlc)
-                        << " ext=" << static_cast<unsigned>(socketFrame.is_extended)
-                        << " rtr=" << static_cast<unsigned>(socketFrame.is_rtr)
-                        << " err=" << static_cast<unsigned>(socketFrame.is_error));
-        return;
-    }
+    const struct can_frame socketFrame = toLinuxCanFrame(frame);
 
-    if (!interface_->send(socketFrame)) {
-        ROS_WARN_STREAM("[SocketCanController] Failed to enqueue frame on " << deviceName_);
+    const auto written = ::write(socketFd_, &socketFrame, sizeof(socketFrame));
+    if (written != static_cast<ssize_t>(sizeof(socketFrame))) {
+        ROS_WARN_STREAM("[SocketCanController] Failed to send frame on " << deviceName_
+                        << ", errno=" << errno);
     }
 }
 
@@ -134,9 +134,39 @@ void SocketCanController::removeReceiveHandler(std::size_t handlerId)
     handlers_.erase(handlerId);
 }
 
-void SocketCanController::handleFrame(const can::Frame &frame)
+void SocketCanController::receiveLoop()
 {
-    dispatchReceive(fromSocketCanFrame(frame));
+    while (!stopRequested_.load()) {
+        if (socketFd_ < 0) {
+            break;
+        }
+
+        fd_set readFds;
+        FD_ZERO(&readFds);
+        FD_SET(socketFd_, &readFds);
+        struct timeval tv {};
+        tv.tv_sec = 0;
+        tv.tv_usec = 200000; // 200ms，保证 shutdown 最多等待一个轮询周期
+
+        const int sel = ::select(socketFd_ + 1, &readFds, nullptr, nullptr, &tv);
+        if (sel < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            ROS_WARN_STREAM("[SocketCanController] select() failed on " << deviceName_
+                            << ", errno=" << errno);
+            continue;
+        }
+        if (sel == 0 || !FD_ISSET(socketFd_, &readFds)) {
+            continue;
+        }
+
+        struct can_frame rxFrame {};
+        const auto n = ::read(socketFd_, &rxFrame, sizeof(rxFrame));
+        if (n == static_cast<ssize_t>(sizeof(rxFrame))) {
+            dispatchReceive(fromLinuxCanFrame(rxFrame));
+        }
+    }
 }
 
 void SocketCanController::dispatchReceive(const CanTransport::Frame &frame)
@@ -158,31 +188,31 @@ void SocketCanController::dispatchReceive(const CanTransport::Frame &frame)
     }
 }
 
-can::Frame SocketCanController::toSocketCanFrame(const CanTransport::Frame &frame) const
+struct can_frame SocketCanController::toLinuxCanFrame(const CanTransport::Frame &frame) const
 {
-    can::Frame socketFrame;
-    socketFrame.id = frame.id;
-    socketFrame.is_extended = frame.isExtended ? 1 : 0;
-    socketFrame.is_rtr = frame.isRemoteRequest ? 1 : 0;
-    socketFrame.is_error = 0;
-    socketFrame.data.fill(0);
-    // DLC 始终截断到 8 字节，避免越界复制。
-    socketFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(socketFrame.data.size()));
-    for (std::size_t i = 0; i < socketFrame.dlc; ++i) {
+    struct can_frame socketFrame {};
+    socketFrame.can_id = frame.id;
+    if (frame.isExtended) {
+        socketFrame.can_id |= CAN_EFF_FLAG;
+    }
+    if (frame.isRemoteRequest) {
+        socketFrame.can_id |= CAN_RTR_FLAG;
+    }
+    socketFrame.can_dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(8));
+    for (std::size_t i = 0; i < socketFrame.can_dlc; ++i) {
         socketFrame.data[i] = frame.data[i];
     }
     return socketFrame;
 }
 
-CanTransport::Frame SocketCanController::fromSocketCanFrame(const can::Frame &frame) const
+CanTransport::Frame SocketCanController::fromLinuxCanFrame(const struct can_frame &frame) const
 {
     CanTransport::Frame userFrame;
-    userFrame.id = frame.id;
-    userFrame.isExtended = frame.is_extended != 0;
-    userFrame.isRemoteRequest = frame.is_rtr != 0;
+    userFrame.id = static_cast<std::uint32_t>(frame.can_id & CAN_EFF_MASK);
+    userFrame.isExtended = (frame.can_id & CAN_EFF_FLAG) != 0;
+    userFrame.isRemoteRequest = (frame.can_id & CAN_RTR_FLAG) != 0;
     userFrame.data.fill(0);
-    // 同样按 8 字节上限截断，保持对称转换。
-    userFrame.dlc = std::min<std::uint8_t>(frame.dlc, static_cast<std::uint8_t>(userFrame.data.size()));
+    userFrame.dlc = std::min<std::uint8_t>(frame.can_dlc, static_cast<std::uint8_t>(8));
     for (std::size_t i = 0; i < userFrame.dlc; ++i) {
         userFrame.data[i] = frame.data[i];
     }
