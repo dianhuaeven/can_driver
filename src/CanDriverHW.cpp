@@ -911,6 +911,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     // read() 会直接读取这些值作为反馈
 #else
     // ========== 真实 CAN 模式 ==========
+    bool anyFaultObserved = false;
 
     // 应用关节限位（钳制命令值到安全范围）
     posLimitsIface_.enforceLimits(period);
@@ -1094,7 +1095,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                     }
 
                     if (hasFault) {
-                        lifecycleCoordinator_.SetFaulted();
+                        anyFaultObserved = true;
                         if (needIssueStop) {
                             if (!proto->Stop(jc.motorId)) {
                                 ROS_WARN_THROTTLE(
@@ -1145,6 +1146,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
             }
         }
     }
+    lifecycleCoordinator_.UpdateFromFeedback(anyFaultObserved);
 #endif
 }
 
@@ -1236,12 +1238,7 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
             msgs.push_back(msg);
         }
     }
-    const auto mode = lifecycleCoordinator_.mode();
-    if (anyFault &&
-        (mode == can_driver::SystemOpMode::Armed ||
-         mode == can_driver::SystemOpMode::Running)) {
-        lifecycleCoordinator_.SetFaulted();
-    }
+    lifecycleCoordinator_.UpdateFromFeedback(anyFault);
     if (!active_.load(std::memory_order_acquire)) {
         return;
     }

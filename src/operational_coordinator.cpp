@@ -320,4 +320,24 @@ OperationalCoordinator::Result OperationalCoordinator::RequestShutdown(bool forc
         });
 }
 
+void OperationalCoordinator::UpdateFromFeedback(bool unhealthy)
+{
+    if (!unhealthy) {
+        return;
+    }
+
+    const auto current = mode_.load(std::memory_order_acquire);
+    if (current != SystemOpMode::Armed && current != SystemOpMode::Running) {
+        return;
+    }
+
+    SystemOpMode expected = current;
+    if (mode_.compare_exchange_strong(expected,
+                                      SystemOpMode::Faulted,
+                                      std::memory_order_acq_rel)) {
+        ROS_WARN("[can_driver::OperationalCoordinator] %s -> Faulted (auto)",
+                 SystemOpModeName(current));
+    }
+}
+
 } // namespace can_driver

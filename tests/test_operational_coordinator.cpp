@@ -1,0 +1,100 @@
+#include <gtest/gtest.h>
+
+#include "can_driver/operational_coordinator.hpp"
+
+namespace {
+
+can_driver::OperationalCoordinator::DriverOps makeHappyOps()
+{
+    can_driver::OperationalCoordinator::DriverOps ops;
+    ops.init_device = [](const std::string &, bool) {
+        return can_driver::OperationalCoordinator::Result{true, "initialized"};
+    };
+    ops.enable_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "enabled"};
+    };
+    ops.disable_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "disabled"};
+    };
+    ops.halt_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "halted"};
+    };
+    ops.recover_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "recovered"};
+    };
+    ops.shutdown_all = [](bool) {
+        return can_driver::OperationalCoordinator::Result{true, "shutdown"};
+    };
+    ops.motion_healthy = [](std::string *) {
+        return true;
+    };
+    ops.any_fault_active = []() {
+        return false;
+    };
+    ops.hold_commands = []() {};
+    ops.arm_fresh_command_latch = []() {};
+    return ops;
+}
+
+TEST(OperationalCoordinatorTest, TransitionMatrixFollowsLifecycleFlow)
+{
+    can_driver::OperationalCoordinator coordinator(makeHappyOps());
+
+    coordinator.SetConfigured();
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Configured);
+
+    auto result = coordinator.RequestInit("fake0", false);
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    result = coordinator.RequestRelease();
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Running);
+
+    result = coordinator.RequestHalt();
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    result = coordinator.RequestDisable();
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Standby);
+
+    result = coordinator.RequestEnable();
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    result = coordinator.RequestShutdown(false);
+    ASSERT_TRUE(result.ok);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Configured);
+}
+
+TEST(OperationalCoordinatorTest, AutoFaultDowngradeFromRunning)
+{
+    can_driver::OperationalCoordinator coordinator(makeHappyOps());
+
+    coordinator.SetConfigured();
+    ASSERT_TRUE(coordinator.RequestInit("fake0", false).ok);
+    ASSERT_TRUE(coordinator.RequestRelease().ok);
+    ASSERT_EQ(coordinator.mode(), can_driver::SystemOpMode::Running);
+
+    coordinator.UpdateFromFeedback(true);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Faulted);
+}
+
+TEST(OperationalCoordinatorTest, RecoverFailureKeepsFaulted)
+{
+    auto ops = makeHappyOps();
+    ops.recover_all = []() {
+        return can_driver::OperationalCoordinator::Result{false, "recover failed"};
+    };
+
+    can_driver::OperationalCoordinator coordinator(ops);
+    coordinator.SetFaulted();
+
+    const auto result = coordinator.RequestRecover();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.message, "recover failed");
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Faulted);
+}
+
+} // namespace

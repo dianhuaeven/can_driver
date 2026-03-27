@@ -62,6 +62,7 @@ public:
     Result RequestHalt();
     Result RequestRecover();
     Result RequestShutdown(bool force);
+    void UpdateFromFeedback(bool unhealthy);
 
 private:
     Result DoTransition(std::initializer_list<SystemOpMode> allowedFrom,
