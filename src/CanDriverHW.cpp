@@ -33,6 +33,10 @@ CanDriverHW::~CanDriverHW()
     initSrv_.shutdown();
     shutdownSrv_.shutdown();
     recoverSrv_.shutdown();
+    enableSrv_.shutdown();
+    disableSrv_.shutdown();
+    haltSrv_.shutdown();
+    resumeSrv_.shutdown();
     motorCmdSrv_.shutdown();
     setZeroLimitSrv_.shutdown();
 }
@@ -444,6 +448,10 @@ void CanDriverHW::setupRosComm(ros::NodeHandle &pnh)
     initSrv_     = pnh.advertiseService("init",          &CanDriverHW::onInit,         this);
     shutdownSrv_ = pnh.advertiseService("shutdown",      &CanDriverHW::onShutdown,     this);
     recoverSrv_  = pnh.advertiseService("recover",       &CanDriverHW::onRecover,      this);
+    enableSrv_   = pnh.advertiseService("enable",        &CanDriverHW::onEnable,       this);
+    disableSrv_  = pnh.advertiseService("disable",       &CanDriverHW::onDisable,      this);
+    haltSrv_     = pnh.advertiseService("halt",          &CanDriverHW::onHalt,         this);
+    resumeSrv_   = pnh.advertiseService("resume",        &CanDriverHW::onResume,       this);
     motorCmdSrv_ = pnh.advertiseService("motor_command", &CanDriverHW::onMotorCommand, this);
     setZeroLimitSrv_ = pnh.advertiseService("set_zero_limit",
                                             &CanDriverHW::onSetZeroLimit,
@@ -494,6 +502,22 @@ void CanDriverHW::clearDirectCmd(const std::string &jointName)
     if (it != jointIndexByName_.end()) {
         joints_[it->second].hasDirectPosCmd = false;
         joints_[it->second].hasDirectVelCmd = false;
+    }
+}
+
+void CanDriverHW::holdCommandsForLifecycleTransition()
+{
+    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        auto &jc = joints_[i];
+        jc.hasDirectPosCmd = false;
+        jc.hasDirectVelCmd = false;
+        if (jc.controlMode == "position") {
+            jc.posCmd = jc.pos;
+        } else {
+            jc.velCmd = 0.0;
+        }
+        commandValidBuffer_[i] = 0;
     }
 }
 
@@ -957,6 +981,12 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
     if (res.success) {
         active_.store(true, std::memory_order_release);
         stateTimer_.start();
+        const auto transition = lifecycleCoordinator_.RequestInit();
+        if (!transition.ok) {
+            res.success = false;
+            res.message = transition.message;
+            return true;
+        }
     }
     res.message = res.success ? "OK" : "Failed to initialize " + req.device;
     return true;
@@ -965,6 +995,7 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
 bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
                               can_driver::Shutdown::Response &res)
 {
+    const auto transition = lifecycleCoordinator_.RequestShutdown();
     active_.store(false, std::memory_order_release);
     stateTimer_.stop();
     deviceManager_->shutdownAll();
@@ -978,8 +1009,10 @@ bool CanDriverHW::onShutdown(can_driver::Shutdown::Request & /*req*/,
         }
     }
 
-    res.success = true;
-    res.message = "All CAN devices shut down.";
+    res.success = transition.ok;
+    res.message = transition.ok ? "All CAN devices shut down."
+                                : (transition.message.empty() ? "Shutdown state transition failed."
+                                                              : transition.message);
     ROS_INFO("[CanDriverHW] All devices shut down.");
     return true;
 }
@@ -1042,6 +1075,56 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
         res.success = false;
         res.message = "Motor not found.";
     }
+    return true;
+}
+
+bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
+                           std_srvs::Trigger::Response &res)
+{
+    const auto transition = lifecycleCoordinator_.RequestEnable();
+    res.success = transition.ok;
+    res.message = transition.ok ? "enabled (armed)"
+                                : (transition.message.empty() ? "enable failed"
+                                                              : transition.message);
+    return true;
+}
+
+bool CanDriverHW::onDisable(std_srvs::Trigger::Request & /*req*/,
+                            std_srvs::Trigger::Response &res)
+{
+    const auto transition = lifecycleCoordinator_.RequestDisable();
+    if (transition.ok) {
+        holdCommandsForLifecycleTransition();
+    }
+    res.success = transition.ok;
+    res.message = transition.ok ? "disabled (standby)"
+                                : (transition.message.empty() ? "disable failed"
+                                                              : transition.message);
+    return true;
+}
+
+bool CanDriverHW::onHalt(std_srvs::Trigger::Request & /*req*/,
+                         std_srvs::Trigger::Response &res)
+{
+    const auto transition = lifecycleCoordinator_.RequestHalt();
+    if (transition.ok) {
+        holdCommandsForLifecycleTransition();
+    }
+    res.success = transition.ok;
+    res.message = transition.ok ? "halted"
+                                : (transition.message.empty() ? "halt failed"
+                                                              : transition.message);
+    return true;
+}
+
+bool CanDriverHW::onResume(std_srvs::Trigger::Request & /*req*/,
+                           std_srvs::Trigger::Response &res)
+{
+    const auto transition = lifecycleCoordinator_.RequestRelease();
+    res.success = transition.ok;
+    res.message = transition.ok ? "resumed"
+                                : (transition.message.empty() ? "resume failed"
+                                                              : transition.message);
     return true;
 }
 

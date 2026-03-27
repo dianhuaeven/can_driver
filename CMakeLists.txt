@@ -18,6 +18,7 @@ find_package(catkin REQUIRED COMPONENTS
   message_generation
   roscpp
   std_msgs
+  std_srvs
   urdf
 )
 
@@ -116,7 +117,7 @@ generate_messages(
 catkin_package(
   INCLUDE_DIRS include
   LIBRARIES can_driver_transport
-  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp std_msgs urdf
+  CATKIN_DEPENDS actionlib actionlib_msgs controller_manager hardware_interface joint_limits_interface message_runtime roscpp std_msgs std_srvs urdf
 )
 
 # Enable testing

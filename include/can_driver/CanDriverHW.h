@@ -25,6 +25,7 @@
 #include <joint_limits_interface/joint_limits_urdf.h>
 #include <ros/ros.h>
 #include <std_msgs/Float64.h>
+#include <std_srvs/Trigger.h>
 #include <urdf/model.h>
 
 #include <map>
@@ -141,6 +142,10 @@ private:
     ros::ServiceServer initSrv_;
     ros::ServiceServer shutdownSrv_;
     ros::ServiceServer recoverSrv_;
+    ros::ServiceServer enableSrv_;
+    ros::ServiceServer disableSrv_;
+    ros::ServiceServer haltSrv_;
+    ros::ServiceServer resumeSrv_;
     ros::ServiceServer motorCmdSrv_;
     ros::ServiceServer setZeroLimitSrv_;
 
@@ -181,6 +186,7 @@ private:
     bool syncStartupPositionAndCommands();
     void setupRosComm(ros::NodeHandle &pnh);
     void clearDirectCmd(const std::string &jointName);
+    void holdCommandsForLifecycleTransition();
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
 
     enum class MotorOpStatus {
@@ -219,6 +225,10 @@ private:
     bool onInit(can_driver::Init::Request &req, can_driver::Init::Response &res);
     bool onShutdown(can_driver::Shutdown::Request &req, can_driver::Shutdown::Response &res);
     bool onRecover(can_driver::Recover::Request &req, can_driver::Recover::Response &res);
+    bool onEnable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool onDisable(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool onHalt(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
+    bool onResume(std_srvs::Trigger::Request &req, std_srvs::Trigger::Response &res);
     bool onMotorCommand(can_driver::MotorCommand::Request &req,
                         can_driver::MotorCommand::Response &res);
     bool onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
