@@ -271,6 +271,18 @@ bool EyouCan::Stop(MotorID Id)
     return true;
 }
 
+bool EyouCan::ResetFault(MotorID Id)
+{
+    if (!canController) {
+        return false;
+    }
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    registerManagedMotorId(motorId);
+    sendWriteCommand(motorId, 0x15, 0x00000000, 4);
+    sendReadCommand(motorId, 0x15);
+    return true;
+}
+
 // [FIX #9] 移除 position==0 的不可靠判断，改用 hasReceived 标志
 int64_t EyouCan::getPosition(MotorID Id) const
 {
@@ -502,7 +514,7 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                     resyncEnable = true;
                     break;
                 case 0x15:
-                    resyncCurrent = true;
+                    requestFault(motorId);
                     break;
                 default:
                     break;
@@ -604,6 +616,11 @@ void EyouCan::requestEnable(uint8_t motorId) const
     sendReadCommand(motorId, 0x10);
 }
 
+void EyouCan::requestFault(uint8_t motorId) const
+{
+    sendReadCommand(motorId, 0x15);
+}
+
 // [FIX #7] 新增：请求电流值
 void EyouCan::requestCurrent(uint8_t motorId) const
 {
@@ -635,6 +652,7 @@ void EyouCan::refreshMotorStates()
         requestPosition(motorId);
         requestMode(motorId);
         requestEnable(motorId);
+        requestFault(motorId);
         requestCurrent(motorId);   // [FIX #7] 轮询电流
         requestVelocity(motorId);  // [FIX #8] 轮询实际速度
     }

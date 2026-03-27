@@ -66,6 +66,7 @@ public:
      * @brief 紧急停止（0x11）
      */
     bool Stop(MotorID motorId) override;
+    bool ResetFault(MotorID motorId) override;
 
     /**
      * @brief 读取/缓存电机位置（如无缓存则触发 0x07 读取）
@@ -149,6 +150,7 @@ private:
     void requestPosition(uint8_t motorId) const;
     void requestMode(uint8_t motorId) const;
     void requestEnable(uint8_t motorId) const;
+    void requestFault(uint8_t motorId) const;
     void requestCurrent(uint8_t motorId) const;
     void requestVelocity(uint8_t motorId) const;
     bool isManagedMotorId(uint8_t motorId) const;

@@ -86,6 +86,7 @@ public:
      * @brief 停止（0x81）
      */
     bool Stop(MotorID motorId) override;
+    bool ResetFault(MotorID motorId) override;
 
     /**
      * @brief 返回缓存的电机位置

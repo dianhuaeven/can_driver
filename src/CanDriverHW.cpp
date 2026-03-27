@@ -830,6 +830,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                     }
 
                     if (hasFault) {
+                        lifecycleCoordinator_.SetFaulted();
                         if (needIssueStop) {
                             if (!proto->Stop(jc.motorId)) {
                                 ROS_WARN_THROTTLE(
@@ -943,6 +944,7 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
 
     std::vector<can_driver::MotorState> msgs;
     msgs.reserve(joints_.size());
+    bool anyFault = false;
     {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         for (std::size_t i = 0; i < joints_.size(); ++i) {
@@ -964,10 +966,17 @@ void CanDriverHW::publishMotorStates(const ros::TimerEvent & /*e*/)
             if (statusSnapshots[i].valid) {
                 msg.enabled = statusSnapshots[i].enabled;
                 msg.fault = statusSnapshots[i].fault;
+                anyFault = anyFault || statusSnapshots[i].fault;
             }
 
             msgs.push_back(msg);
         }
+    }
+    const auto mode = lifecycleCoordinator_.mode();
+    if (anyFault &&
+        (mode == can_driver::SystemOpMode::Armed ||
+         mode == can_driver::SystemOpMode::Running)) {
+        lifecycleCoordinator_.SetFaulted();
     }
     if (!active_.load(std::memory_order_acquire)) {
         return;
@@ -1044,43 +1053,115 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
         (req.motor_id == kRecoverAllExplicit) ||
         (req.motor_id == kRecoverAllLegacy && !hasExactMatch);
 
+    std::vector<const JointConfig *> targets;
+    targets.reserve(joints_.size());
+    for (const auto &jc : joints_) {
+        if (recoverAll || static_cast<uint16_t>(jc.motorId) == req.motor_id) {
+            targets.push_back(&jc);
+        }
+    }
+    if (targets.empty()) {
+        res.success = false;
+        res.message = "Motor not found.";
+        return true;
+    }
+
+    auto queryFault = [this](const JointConfig &jc, bool *hasFault) -> bool {
+        if (!hasFault) {
+            return false;
+        }
+        auto proto = getProtocol(jc.canDevice, jc.protocol);
+        auto devMutex = getDeviceMutex(jc.canDevice);
+        if (!proto || !devMutex) {
+            return false;
+        }
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        *hasFault = proto->hasFault(jc.motorId);
+        return true;
+    };
+
+    bool anyFault = false;
+    for (const auto *jc : targets) {
+        bool hasFault = false;
+        if (queryFault(*jc, &hasFault) && hasFault) {
+            anyFault = true;
+            break;
+        }
+    }
+    if (anyFault) {
+        lifecycleCoordinator_.SetFaulted();
+    }
+    if (lifecycleCoordinator_.mode() != can_driver::SystemOpMode::Faulted) {
+        res.success = false;
+        res.message = "Recover only allowed in Faulted state.";
+        return true;
+    }
+
     bool found = false;
     bool hasFailure = false;
     MotorOpStatus firstFailure = MotorOpStatus::Ok;
-    for (const auto &jc : joints_) {
-        if (recoverAll || static_cast<uint16_t>(jc.motorId) == req.motor_id) {
-            const auto status = executeOnMotor(
-                jc,
-                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                    return proto->Enable(id);
-                },
-                "Recover");
-            if (status == MotorOpStatus::Ok) {
-                found = true;
-            } else if (!hasFailure) {
-                hasFailure = true;
-                firstFailure = status;
-            }
+    for (const auto *jc : targets) {
+        const auto status = executeOnMotor(
+            *jc,
+            [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->ResetFault(id);
+            },
+            "Recover");
+        if (status == MotorOpStatus::Ok) {
+            found = true;
+        } else if (!hasFailure) {
+            hasFailure = true;
+            firstFailure = status;
         }
     }
-    if (found) {
-        res.success = true;
-        res.message = "Recovered.";
-    } else if (hasFailure) {
+    if (!found && hasFailure) {
         res.success = false;
         if (firstFailure == MotorOpStatus::DeviceNotReady) {
             res.message = "CAN device not ready.";
         } else if (firstFailure == MotorOpStatus::ProtocolUnavailable) {
-            res.message = "Protocol not available.";
+            res.message = "Protocol fault-reset path not available.";
         } else if (firstFailure == MotorOpStatus::Rejected) {
             res.message = "Recover command rejected.";
         } else {
             res.message = "Recover execution failed.";
         }
-    } else {
-        res.success = false;
-        res.message = "Motor not found.";
+        return true;
     }
+    if (!found) {
+        res.success = false;
+        res.message = "No motors available for recover.";
+        return true;
+    }
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        bool allHealthy = true;
+        for (const auto *jc : targets) {
+            bool hasFault = false;
+            if (!queryFault(*jc, &hasFault)) {
+                res.success = false;
+                res.message = "Protocol not available during fault verification.";
+                return true;
+            }
+            if (hasFault) {
+                allHealthy = false;
+                break;
+            }
+        }
+        if (allHealthy) {
+            holdCommandsForLifecycleTransition();
+            const auto transition = lifecycleCoordinator_.RequestRecover();
+            res.success = transition.ok;
+            res.message = transition.ok ? "Recovered (standby)."
+                                        : (transition.message.empty() ? "recover state transition failed"
+                                                                      : transition.message);
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+
+    res.success = false;
+    res.message = "Recover timeout: fault still active.";
     return true;
 }
 

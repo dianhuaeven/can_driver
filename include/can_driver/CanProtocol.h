@@ -91,6 +91,19 @@ public:
     virtual bool Stop(MotorID motorId) = 0;
 
     /**
+     * @brief 清除或复位当前故障状态
+     * @param motorId 目标电机 ID
+     * @return 协议支持并下发成功返回 true；不支持或失败返回 false
+     *
+     * 该接口语义必须与 Enable/Disable 分离，调用方不得再用 Enable 伪装恢复流程。
+     */
+    virtual bool ResetFault(MotorID motorId)
+    {
+        (void)motorId;
+        return false;
+    }
+
+    /**
      * @brief 读取或返回缓存的实际位置
      * @param motorId 目标电机 ID
      * @return 位置值（协议单位）

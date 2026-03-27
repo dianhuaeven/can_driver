@@ -355,6 +355,17 @@ bool MtCan::Stop(MotorID Id)
     return true;
 }
 
+bool MtCan::ResetFault(MotorID Id)
+{
+    if (!canController) {
+        return false;
+    }
+    const uint8_t motorId = static_cast<uint8_t>(Id);
+    resetSystem(motorId);
+    requestError(motorId);
+    return true;
+}
+
 // [FIX #5] 返回电机实际位置（从 0x92 多圈角度读回），而非命令值
 int64_t MtCan::getPosition(MotorID Id) const
 {
