@@ -237,6 +237,16 @@ protected:
         static std::atomic<int> seq{0};
         return "/" + base + "_" + std::to_string(seq.fetch_add(1));
     }
+
+    static void enterRunning(CanDriverHW &hw)
+    {
+        auto &coordinator = hw.operationalCoordinator();
+        const auto initResult = coordinator.RequestInit("fake0", false);
+        ASSERT_TRUE(initResult.ok) << initResult.message;
+
+        const auto releaseResult = coordinator.RequestRelease();
+        ASSERT_TRUE(releaseResult.ok) << releaseResult.message;
+    }
 };
 
 TEST_F(CanDriverHWSmokeTest, InitAndDirectWriteUsesProtocol)
@@ -252,6 +262,7 @@ TEST_F(CanDriverHWSmokeTest, InitAndDirectWriteUsesProtocol)
     pnh.setParam("motor_state_period_sec", 0.2);
 
     ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
@@ -325,6 +336,7 @@ TEST_F(CanDriverHWSmokeTest, WriteAutoStopOnFaultAndBlockMotion)
     pnh.setParam("safety_require_enabled_for_motion", false);
 
     ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();
@@ -366,6 +378,7 @@ TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand
     pnh.setParam("safety_hold_after_device_recover", true);
 
     ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
 
     ros::AsyncSpinner spinner(1);
     spinner.start();

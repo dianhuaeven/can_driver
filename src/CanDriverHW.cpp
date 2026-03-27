@@ -14,6 +14,7 @@ CanDriverHW::CanDriverHW()
     : deviceManager_(std::make_shared<DeviceManager>())
 {
     motorActionExecutor_.setDeviceManager(deviceManager_);
+    lifecycleDriverOps_.configure(deviceManager_, &motorActionExecutor_);
     configureCommandGate();
     configureLifecycleCoordinator();
 }
@@ -25,6 +26,7 @@ CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
         deviceManager_ = std::make_shared<DeviceManager>();
     }
     motorActionExecutor_.setDeviceManager(deviceManager_);
+    lifecycleDriverOps_.configure(deviceManager_, &motorActionExecutor_);
     configureCommandGate();
     configureLifecycleCoordinator();
 }
@@ -92,6 +94,7 @@ void CanDriverHW::resetInternalState()
     commandValidBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
     commandGate_.reset();
+    lifecycleDriverOps_.setTargets({});
     deviceManager_->shutdownAll();
 }
 
@@ -324,6 +327,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
     rebuildJointGroups();
     rawCommandBuffer_.assign(joints_.size(), 0);
     commandValidBuffer_.assign(joints_.size(), 0);
+    syncLifecycleTargets();
     return true;
 }
 
@@ -448,25 +452,25 @@ void CanDriverHW::configureLifecycleCoordinator()
         return initializeLifecycleDevice(device, loopback);
     };
     ops.enable_all = [this]() {
-        return enableAllMotors();
+        return lifecycleDriverOps_.enableAll();
     };
     ops.disable_all = [this]() {
-        return disableAllMotors();
+        return lifecycleDriverOps_.disableAll();
     };
     ops.halt_all = [this]() {
-        return haltAllMotors();
+        return lifecycleDriverOps_.haltAll();
     };
     ops.recover_all = [this]() {
-        return recoverAllMotors();
+        return lifecycleDriverOps_.recoverAll();
     };
     ops.shutdown_all = [this](bool force) {
         return shutdownLifecycleDriver(force);
     };
     ops.motion_healthy = [this](std::string *detail) {
-        return allMotorsHealthyForMotion(detail);
+        return lifecycleDriverOps_.motionHealthy(detail);
     };
     ops.any_fault_active = [this]() {
-        return anyMotorFaultActive();
+        return lifecycleDriverOps_.anyFaultActive();
     };
     ops.hold_commands = [this]() {
         commandGate_.holdCommands();
@@ -577,6 +581,16 @@ std::vector<CommandGate::Snapshot> CanDriverHW::captureCommandSnapshots() const
     return snapshots;
 }
 
+void CanDriverHW::syncLifecycleTargets()
+{
+    std::vector<MotorActionExecutor::Target> targets;
+    targets.reserve(joints_.size());
+    for (const auto &jc : joints_) {
+        targets.push_back(MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId});
+    }
+    lifecycleDriverOps_.setTargets(std::move(targets));
+}
+
 const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId) const
 {
     for (const auto &jc : joints_) {
@@ -592,238 +606,24 @@ MotorActionExecutor::Target CanDriverHW::makeMotorTarget(const JointConfig &jc) 
     return MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId};
 }
 
-std::vector<MotorActionExecutor::Target> CanDriverHW::allMotorTargets() const
-{
-    std::vector<MotorActionExecutor::Target> targets;
-    targets.reserve(joints_.size());
-    for (const auto &jc : joints_) {
-        targets.push_back(makeMotorTarget(jc));
-    }
-    return targets;
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::makeMotorActionFailureResult(
-    MotorActionExecutor::Status status,
-    const char *rejectedMessage,
-    const char *protocolUnavailableMessage) const
-{
-    if (status == MotorActionExecutor::Status::DeviceNotReady) {
-        return {false, "CAN device not ready."};
-    }
-    if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
-        return {false, protocolUnavailableMessage ? protocolUnavailableMessage : "Protocol not available."};
-    }
-    if (status == MotorActionExecutor::Status::Rejected) {
-        return {false, rejectedMessage ? rejectedMessage : "Command rejected."};
-    }
-    return {false, "Command execution failed."};
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::runMotorBatchAction(
-    const std::vector<MotorActionExecutor::Target> &targets,
-    const MotorActionExecutor::Action &action,
-    const char *operationName,
-    const char *rejectedMessage,
-    const char *protocolUnavailableMessage,
-    bool requireAnyTarget) const
-{
-    if (targets.empty()) {
-        return requireAnyTarget
-                   ? can_driver::OperationalCoordinator::Result{false, "No joints available."}
-                   : can_driver::OperationalCoordinator::Result{true, "No joints to process."};
-    }
-
-    const auto batch = motorActionExecutor_.executeBatch(targets, action, operationName);
-    if (!batch.anySuccess && batch.anyFailure) {
-        return makeMotorActionFailureResult(batch.firstFailure,
-                                            rejectedMessage,
-                                            protocolUnavailableMessage);
-    }
-    if (!batch.anySuccess && requireAnyTarget) {
-        return {false, "No joints available."};
-    }
-    if (batch.anyFailure) {
-        return makeMotorActionFailureResult(batch.firstFailure,
-                                            rejectedMessage,
-                                            protocolUnavailableMessage);
-    }
-    return {true, "OK"};
-}
-
-bool CanDriverHW::queryMotorFault(const MotorActionExecutor::Target &target, bool *hasFault) const
-{
-    if (!hasFault) {
-        return false;
-    }
-
-    auto proto = getProtocol(target.canDevice, target.protocol);
-    auto devMutex = getDeviceMutex(target.canDevice);
-    if (!proto || !devMutex) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> devLock(*devMutex);
-    *hasFault = proto->hasFault(target.motorId);
-    return true;
-}
-
-bool CanDriverHW::anyMotorFaultActive() const
-{
-    for (const auto &target : allMotorTargets()) {
-        bool hasFault = false;
-        if (queryMotorFault(target, &hasFault) && hasFault) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool CanDriverHW::allMotorsHealthyForMotion(std::string *detail) const
-{
-    for (const auto &target : allMotorTargets()) {
-        if (!isDeviceReady(target.canDevice)) {
-            if (detail) {
-                *detail = "CAN device not ready.";
-            }
-            return false;
-        }
-        bool hasFault = false;
-        if (!queryMotorFault(target, &hasFault)) {
-            if (detail) {
-                *detail = "Protocol not available.";
-            }
-            return false;
-        }
-        if (hasFault) {
-            if (detail) {
-                *detail = "Fault still active.";
-            }
-            return false;
-        }
-    }
-    return true;
-}
-
 can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevice(
     const std::string &device,
     bool loopback)
 {
-    if (!initDevice(device, loopback)) {
-        return {false, "Failed to initialize " + device};
+    const auto result = lifecycleDriverOps_.initializeDevice(device, loopback);
+    if (!result.ok) {
+        return result;
     }
     active_.store(true, std::memory_order_release);
     stateTimer_.start();
-    return {true, "initialized (armed)"};
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::enableAllMotors()
-{
-    const auto targets = allMotorTargets();
-    if (targets.empty()) {
-        return {false, "No joints available for enable."};
-    }
-
-    const auto batch = motorActionExecutor_.executeBatch(
-        targets,
-        [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-            return proto->Enable(id);
-        },
-        "Enable");
-    if (batch.anyFailure) {
-        if (!batch.succeededTargets.empty()) {
-            motorActionExecutor_.executeBatch(
-                batch.succeededTargets,
-                [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                    return proto->Disable(id);
-                },
-                "Enable rollback");
-        }
-        return makeMotorActionFailureResult(batch.firstFailure,
-                                            "Enable command rejected.",
-                                            "Protocol not available.");
-    }
-    if (!batch.anySuccess) {
-        return {false, "No joints available for enable."};
-    }
-    return {true, "enabled (armed)"};
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::disableAllMotors()
-{
-    return runMotorBatchAction(
-        allMotorTargets(),
-        [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-            return proto->Disable(id);
-        },
-        "Disable",
-        "Disable command rejected.",
-        "Protocol not available.",
-        false);
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::haltAllMotors()
-{
-    return runMotorBatchAction(
-        allMotorTargets(),
-        [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-            return proto->Stop(id);
-        },
-        "Halt",
-        "Halt command rejected.",
-        "Protocol not available.",
-        false);
-}
-
-can_driver::OperationalCoordinator::Result CanDriverHW::recoverAllMotors()
-{
-    const auto targets = allMotorTargets();
-    if (targets.empty()) {
-        return {false, "No motors available for recover."};
-    }
-
-    const auto batch = motorActionExecutor_.executeBatch(
-        targets,
-        [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-            return proto->ResetFault(id);
-        },
-        "Recover");
-    if (!batch.anySuccess && batch.anyFailure) {
-        return makeMotorActionFailureResult(batch.firstFailure,
-                                            "Recover command rejected.",
-                                            "Protocol fault-reset path not available.");
-    }
-    if (!batch.anySuccess) {
-        return {false, "No motors available for recover."};
-    }
-
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
-    while (std::chrono::steady_clock::now() < deadline) {
-        bool allHealthy = true;
-        for (const auto &target : targets) {
-            bool hasFault = false;
-            if (!queryMotorFault(target, &hasFault)) {
-                return {false, "Protocol not available during fault verification."};
-            }
-            if (hasFault) {
-                allHealthy = false;
-                break;
-            }
-        }
-        if (allHealthy) {
-            return {true, "Recovered (standby)."};
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    }
-
-    return {false, "Recover timeout: fault still active."};
+    return result;
 }
 
 can_driver::OperationalCoordinator::Result CanDriverHW::shutdownLifecycleDriver(bool force)
 {
-    (void)force;
     active_.store(false, std::memory_order_release);
     stateTimer_.stop();
-    deviceManager_->shutdownAll();
+    const auto result = lifecycleDriverOps_.shutdownAll(force);
 
     {
         std::lock_guard<std::mutex> stateLock(jointStateMutex_);
@@ -834,8 +634,10 @@ can_driver::OperationalCoordinator::Result CanDriverHW::shutdownLifecycleDriver(
         }
     }
 
-    ROS_INFO("[CanDriverHW] All devices shut down.");
-    return {true, "All CAN devices shut down."};
+    if (result.ok) {
+        ROS_INFO("[CanDriverHW] All devices shut down.");
+    }
+    return result;
 }
 
 // ---------------------------------------------------------------------------

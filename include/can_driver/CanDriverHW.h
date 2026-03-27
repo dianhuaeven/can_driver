@@ -7,6 +7,7 @@
 #include "can_driver/DeviceManager.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/JointConfigParser.h"
+#include "can_driver/lifecycle_driver_ops.hpp"
 #include "can_driver/MotorID.h"
 #include "can_driver/motor_action_executor.hpp"
 #include "can_driver/operational_coordinator.hpp"
@@ -128,6 +129,7 @@ private:
 
     std::shared_ptr<IDeviceManager> deviceManager_;
     MotorActionExecutor motorActionExecutor_;
+    can_driver::LifecycleDriverOps lifecycleDriverOps_;
     CommandGate commandGate_;
 
     // -----------------------------------------------------------------------
@@ -187,29 +189,11 @@ private:
     void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
     std::vector<CommandGate::Snapshot> captureCommandSnapshots() const;
+    void syncLifecycleTargets();
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
     MotorActionExecutor::Target makeMotorTarget(const JointConfig &jc) const;
-    std::vector<MotorActionExecutor::Target> allMotorTargets() const;
-    can_driver::OperationalCoordinator::Result makeMotorActionFailureResult(
-        MotorActionExecutor::Status status,
-        const char *rejectedMessage,
-        const char *protocolUnavailableMessage) const;
-    can_driver::OperationalCoordinator::Result runMotorBatchAction(
-        const std::vector<MotorActionExecutor::Target> &targets,
-        const MotorActionExecutor::Action &action,
-        const char *operationName,
-        const char *rejectedMessage,
-        const char *protocolUnavailableMessage,
-        bool requireAnyTarget) const;
-    bool queryMotorFault(const MotorActionExecutor::Target &target, bool *hasFault) const;
-    bool anyMotorFaultActive() const;
-    bool allMotorsHealthyForMotion(std::string *detail) const;
     can_driver::OperationalCoordinator::Result initializeLifecycleDevice(const std::string &device,
                                                                          bool loopback);
-    can_driver::OperationalCoordinator::Result enableAllMotors();
-    can_driver::OperationalCoordinator::Result disableAllMotors();
-    can_driver::OperationalCoordinator::Result haltAllMotors();
-    can_driver::OperationalCoordinator::Result recoverAllMotors();
     can_driver::OperationalCoordinator::Result shutdownLifecycleDriver(bool force);
 
     /**
