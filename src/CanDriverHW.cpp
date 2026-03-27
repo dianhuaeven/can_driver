@@ -13,6 +13,7 @@
 CanDriverHW::CanDriverHW()
     : deviceManager_(std::make_shared<DeviceManager>())
 {
+    motorActionExecutor_.setDeviceManager(deviceManager_);
 }
 
 CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
@@ -21,6 +22,7 @@ CanDriverHW::CanDriverHW(std::shared_ptr<IDeviceManager> deviceManager)
     if (!deviceManager_) {
         deviceManager_ = std::make_shared<DeviceManager>();
     }
+    motorActionExecutor_.setDeviceManager(deviceManager_);
 }
 
 // ---------------------------------------------------------------------------
@@ -593,38 +595,9 @@ const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId
     return nullptr;
 }
 
-CanDriverHW::MotorOpStatus CanDriverHW::executeOnMotor(
-    const JointConfig &jc,
-    const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
-    const char *operationName)
+MotorActionExecutor::Target CanDriverHW::makeMotorTarget(const JointConfig &jc) const
 {
-    if (!isDeviceReady(jc.canDevice)) {
-        return MotorOpStatus::DeviceNotReady;
-    }
-
-    auto proto = getProtocol(jc.canDevice, jc.protocol);
-    auto devMutex = getDeviceMutex(jc.canDevice);
-    if (!proto || !devMutex) {
-        return MotorOpStatus::ProtocolUnavailable;
-    }
-
-    std::lock_guard<std::mutex> devLock(*devMutex);
-    try {
-        return op(proto, jc.motorId) ? MotorOpStatus::Ok : MotorOpStatus::Rejected;
-    } catch (const std::exception &e) {
-        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u: %s",
-                  operationName,
-                  jc.canDevice.c_str(),
-                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)),
-                  e.what());
-        return MotorOpStatus::Exception;
-    } catch (...) {
-        ROS_ERROR("[CanDriverHW] %s failed on '%s' motor %u (unknown exception).",
-                  operationName,
-                  jc.canDevice.c_str(),
-                  static_cast<unsigned>(static_cast<uint16_t>(jc.motorId)));
-        return MotorOpStatus::Exception;
-    }
+    return MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId};
 }
 
 // ---------------------------------------------------------------------------
@@ -1168,15 +1141,15 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
 
     bool found = false;
     bool hasFailure = false;
-    MotorOpStatus firstFailure = MotorOpStatus::Ok;
+    MotorActionExecutor::Status firstFailure = MotorActionExecutor::Status::Ok;
     for (const auto *jc : targets) {
-        const auto status = executeOnMotor(
-            *jc,
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(*jc),
             [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->ResetFault(id);
             },
             "Recover");
-        if (status == MotorOpStatus::Ok) {
+        if (status == MotorActionExecutor::Status::Ok) {
             found = true;
         } else if (!hasFailure) {
             hasFailure = true;
@@ -1185,11 +1158,11 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
     }
     if (!found && hasFailure) {
         res.success = false;
-        if (firstFailure == MotorOpStatus::DeviceNotReady) {
+        if (firstFailure == MotorActionExecutor::Status::DeviceNotReady) {
             res.message = "CAN device not ready.";
-        } else if (firstFailure == MotorOpStatus::ProtocolUnavailable) {
+        } else if (firstFailure == MotorActionExecutor::Status::ProtocolUnavailable) {
             res.message = "Protocol fault-reset path not available.";
-        } else if (firstFailure == MotorOpStatus::Rejected) {
+        } else if (firstFailure == MotorActionExecutor::Status::Rejected) {
             res.message = "Recover command rejected.";
         } else {
             res.message = "Recover execution failed.";
@@ -1260,15 +1233,15 @@ bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
 
     bool found = false;
     bool hasFailure = false;
-    MotorOpStatus firstFailure = MotorOpStatus::Ok;
+    MotorActionExecutor::Status firstFailure = MotorActionExecutor::Status::Ok;
     for (const auto &jc : joints_) {
-        const auto status = executeOnMotor(
-            jc,
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(jc),
             [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->Enable(id);
             },
             "Enable");
-        if (status == MotorOpStatus::Ok) {
+        if (status == MotorActionExecutor::Status::Ok) {
             found = true;
         } else if (!hasFailure) {
             hasFailure = true;
@@ -1279,11 +1252,11 @@ bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
     if (hasFailure) {
         lifecycleCoordinator_.RequestDisable();
         res.success = false;
-        if (firstFailure == MotorOpStatus::DeviceNotReady) {
+        if (firstFailure == MotorActionExecutor::Status::DeviceNotReady) {
             res.message = "CAN device not ready.";
-        } else if (firstFailure == MotorOpStatus::ProtocolUnavailable) {
+        } else if (firstFailure == MotorActionExecutor::Status::ProtocolUnavailable) {
             res.message = "Protocol not available.";
-        } else if (firstFailure == MotorOpStatus::Rejected) {
+        } else if (firstFailure == MotorActionExecutor::Status::Rejected) {
             res.message = "Enable command rejected.";
         } else {
             res.message = "Enable execution failed.";
@@ -1324,8 +1297,8 @@ bool CanDriverHW::onDisable(std_srvs::Trigger::Request & /*req*/,
 
     holdCommandsForLifecycleTransition();
     for (const auto &jc : joints_) {
-        executeOnMotor(
-            jc,
+        motorActionExecutor_.execute(
+            makeMotorTarget(jc),
             [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->Disable(id);
             },
@@ -1356,8 +1329,8 @@ bool CanDriverHW::onHalt(std_srvs::Trigger::Request & /*req*/,
 
     holdCommandsForLifecycleTransition();
     for (const auto &jc : joints_) {
-        executeOnMotor(
-            jc,
+        motorActionExecutor_.execute(
+            makeMotorTarget(jc),
             [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->Stop(id);
             },
@@ -1417,14 +1390,14 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         return true;
     }
 
-    auto handleFailure = [&res](MotorOpStatus status, const char *rejectedMsg) {
-        if (status == MotorOpStatus::DeviceNotReady) {
+    auto handleFailure = [&res](MotorActionExecutor::Status status, const char *rejectedMsg) {
+        if (status == MotorActionExecutor::Status::DeviceNotReady) {
             res.success = false;
             res.message = "CAN device not ready.";
-        } else if (status == MotorOpStatus::ProtocolUnavailable) {
+        } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
             res.success = false;
             res.message = "Protocol not available.";
-        } else if (status == MotorOpStatus::Rejected) {
+        } else if (status == MotorActionExecutor::Status::Rejected) {
             res.success = false;
             res.message = rejectedMsg;
         } else {
@@ -1442,13 +1415,13 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         const auto mode = (req.value == 0.0)
                               ? CanProtocol::MotorMode::Position
                               : CanProtocol::MotorMode::Velocity;
-        const auto status = executeOnMotor(
-            *target,
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(*target),
             [&mode](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
                 return proto->setMode(id, mode);
             },
             "Set mode");
-        if (status != MotorOpStatus::Ok) {
+        if (status != MotorActionExecutor::Status::Ok) {
             handleFailure(status, "Set mode command rejected.");
             return true;
         }
@@ -1482,8 +1455,10 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
         if (req.command != entry.cmd) {
             continue;
         }
-        const auto status = executeOnMotor(*target, entry.action, entry.name);
-        if (status != MotorOpStatus::Ok) {
+        const auto status = motorActionExecutor_.execute(makeMotorTarget(*target),
+                                                         entry.action,
+                                                         entry.name);
+        if (status != MotorActionExecutor::Status::Ok) {
             const std::string rejectedMsg = std::string(entry.name) + " command rejected.";
             handleFailure(status, rejectedMsg.c_str());
             return true;
@@ -1598,8 +1573,8 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
             return true;
         }
 
-        const auto status = executeOnMotor(
-            *target,
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(*target),
             [rawMin, rawMax, rawOffset](const std::shared_ptr<CanProtocol> &p, MotorID id) {
                 const bool okOffset = p->setPositionOffset(id, rawOffset);
                 const bool okLimits = p->configurePositionLimits(id, rawMin, rawMax, true);
@@ -1607,13 +1582,13 @@ bool CanDriverHW::onSetZeroLimit(can_driver::SetZeroLimit::Request &req,
             },
             "Set zero/position limits");
 
-        if (status != MotorOpStatus::Ok) {
+        if (status != MotorActionExecutor::Status::Ok) {
             res.success = false;
-            if (status == MotorOpStatus::DeviceNotReady) {
+            if (status == MotorActionExecutor::Status::DeviceNotReady) {
                 res.message = "CAN device not ready.";
-            } else if (status == MotorOpStatus::ProtocolUnavailable) {
+            } else if (status == MotorActionExecutor::Status::ProtocolUnavailable) {
                 res.message = "Protocol not available.";
-            } else if (status == MotorOpStatus::Rejected) {
+            } else if (status == MotorActionExecutor::Status::Rejected) {
                 res.message = "Protocol rejected zero/limit settings (or unsupported by this protocol).";
             } else {
                 res.message = "Set zero/limit execution failed.";

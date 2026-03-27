@@ -7,6 +7,7 @@
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/JointConfigParser.h"
 #include "can_driver/MotorID.h"
+#include "can_driver/motor_action_executor.hpp"
 #include "can_driver/operational_coordinator.hpp"
 
 #include <can_driver/Init.h>
@@ -141,6 +142,7 @@ private:
     std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
 
     std::shared_ptr<IDeviceManager> deviceManager_;
+    MotorActionExecutor motorActionExecutor_;
 
     // -----------------------------------------------------------------------
     // ros_control 接口对象
@@ -201,18 +203,7 @@ private:
     void armFreshCommandLatch();
     bool consumeFreshCommandLatchIfSatisfied();
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
-
-    enum class MotorOpStatus {
-        Ok,
-        DeviceNotReady,
-        ProtocolUnavailable,
-        Rejected,
-        Exception
-    };
-    MotorOpStatus executeOnMotor(
-        const JointConfig &jc,
-        const std::function<bool(const std::shared_ptr<CanProtocol> &, MotorID)> &op,
-        const char *operationName);
+    MotorActionExecutor::Target makeMotorTarget(const JointConfig &jc) const;
 
     /**
      * @brief 初始化（或重新初始化）指定 CAN 通道。

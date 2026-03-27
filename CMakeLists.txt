@@ -144,6 +144,7 @@ add_library(can_driver_transport
   src/MtCan.cpp
   src/EyouCan.cpp
   src/lifecycle_service_gateway.cpp
+  src/motor_action_executor.cpp
   src/operational_coordinator.cpp
   src/SocketCanController.cpp
   src/SafeCommand.cpp
