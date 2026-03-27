@@ -115,10 +115,19 @@ private:
         CanType protocol{CanType::MT};
         std::vector<std::size_t> jointIndices;
     };
+    struct CommandLatchBaseline {
+        double posCmd{0.0};
+        double velCmd{0.0};
+        double directPosCmd{0.0};
+        double directVelCmd{0.0};
+        bool hasDirectPosCmd{false};
+        bool hasDirectVelCmd{false};
+    };
 
     std::deque<JointConfig> joints_;
     std::map<std::string, std::size_t> jointIndexByName_;
     std::vector<DeviceProtocolGroup> jointGroups_;
+    std::vector<CommandLatchBaseline> commandLatchBaselines_;
     std::vector<int32_t>             rawCommandBuffer_;
     std::vector<uint8_t>             commandValidBuffer_;
     std::map<uint16_t, double>       jointZeroOffsetRadByMotorId_;
@@ -158,6 +167,7 @@ private:
 
     // 生命周期与并发控制
     std::atomic<bool> active_{false};
+    std::atomic<bool> freshCommandRequired_{false};
     can_driver::OperationalCoordinator lifecycleCoordinator_;
     mutable std::mutex        jointStateMutex_;
     double directCmdTimeoutSec_{0.5};
@@ -187,6 +197,8 @@ private:
     void setupRosComm(ros::NodeHandle &pnh);
     void clearDirectCmd(const std::string &jointName);
     void holdCommandsForLifecycleTransition();
+    void armFreshCommandLatch();
+    bool consumeFreshCommandLatchIfSatisfied();
     const JointConfig *findJointByMotorId(uint16_t motorId) const;
 
     enum class MotorOpStatus {

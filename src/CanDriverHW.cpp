@@ -89,10 +89,12 @@ void CanDriverHW::resetInternalState()
     joints_.clear();
     jointIndexByName_.clear();
     jointGroups_.clear();
+    commandLatchBaselines_.clear();
     rawCommandBuffer_.clear();
     commandValidBuffer_.clear();
     jointZeroOffsetRadByMotorId_.clear();
     lastDeviceReadyState_.clear();
+    freshCommandRequired_.store(false, std::memory_order_release);
     deviceManager_->shutdownAll();
 }
 
@@ -323,6 +325,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
     }
 
     rebuildJointGroups();
+    commandLatchBaselines_.assign(joints_.size(), CommandLatchBaseline{});
     rawCommandBuffer_.assign(joints_.size(), 0);
     commandValidBuffer_.assign(joints_.size(), 0);
     return true;
@@ -521,6 +524,79 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
     }
 }
 
+void CanDriverHW::armFreshCommandLatch()
+{
+    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+    commandLatchBaselines_.assign(joints_.size(), CommandLatchBaseline{});
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        const auto &jc = joints_[i];
+        auto &baseline = commandLatchBaselines_[i];
+        baseline.posCmd = jc.posCmd;
+        baseline.velCmd = jc.velCmd;
+        baseline.directPosCmd = jc.directPosCmd;
+        baseline.directVelCmd = jc.directVelCmd;
+        baseline.hasDirectPosCmd = jc.hasDirectPosCmd;
+        baseline.hasDirectVelCmd = jc.hasDirectVelCmd;
+    }
+    freshCommandRequired_.store(true, std::memory_order_release);
+}
+
+bool CanDriverHW::consumeFreshCommandLatchIfSatisfied()
+{
+    if (!freshCommandRequired_.load(std::memory_order_acquire)) {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+    if (commandLatchBaselines_.size() != joints_.size()) {
+        freshCommandRequired_.store(false, std::memory_order_release);
+        return true;
+    }
+
+    constexpr double kEps = 1e-12;
+    bool satisfied = false;
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        const auto &jc = joints_[i];
+        const auto &baseline = commandLatchBaselines_[i];
+        if (jc.controlMode == "velocity") {
+            if (jc.hasDirectVelCmd != baseline.hasDirectVelCmd) {
+                satisfied = true;
+                break;
+            }
+            if (jc.hasDirectVelCmd &&
+                std::fabs(jc.directVelCmd - baseline.directVelCmd) > kEps) {
+                satisfied = true;
+                break;
+            }
+            if (std::fabs(jc.velCmd - baseline.velCmd) > kEps) {
+                satisfied = true;
+                break;
+            }
+        } else {
+            if (jc.hasDirectPosCmd != baseline.hasDirectPosCmd) {
+                satisfied = true;
+                break;
+            }
+            if (jc.hasDirectPosCmd &&
+                std::fabs(jc.directPosCmd - baseline.directPosCmd) > kEps) {
+                satisfied = true;
+                break;
+            }
+            if (std::fabs(jc.posCmd - baseline.posCmd) > kEps) {
+                satisfied = true;
+                break;
+            }
+        }
+    }
+
+    if (!satisfied) {
+        return false;
+    }
+
+    freshCommandRequired_.store(false, std::memory_order_release);
+    return true;
+}
+
 const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId) const
 {
     for (const auto &jc : joints_) {
@@ -622,6 +698,11 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
     }
 
     if (lifecycleCoordinator_.mode() != can_driver::SystemOpMode::Running) {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
+        return;
+    }
+    if (!consumeFreshCommandLatchIfSatisfied()) {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
         return;
@@ -785,19 +866,8 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                 1.0,
                 "[CanDriverHW] Device '%s' recovered, hold one cycle and require fresh command.",
                 device.c_str());
-            std::lock_guard<std::mutex> lock(jointStateMutex_);
-            for (const std::size_t idx : group.jointIndices) {
-                auto &jc = joints_[idx];
-                jc.hasDirectPosCmd = false;
-                jc.hasDirectVelCmd = false;
-                jc.stopIssuedOnFault = false;
-                if (jc.controlMode == "position") {
-                    jc.posCmd = jc.pos;
-                } else {
-                    jc.velCmd = 0.0;
-                }
-                commandValidBuffer_[idx] = 0;
-            }
+            holdCommandsForLifecycleTransition();
+            armFreshCommandLatch();
             continue;
         }
 
@@ -1002,6 +1072,7 @@ bool CanDriverHW::onInit(can_driver::Init::Request &req,
             res.message = transition.message;
             return true;
         }
+        armFreshCommandLatch();
     }
     res.message = res.success ? "OK" : "Failed to initialize " + req.device;
     return true;
@@ -1150,6 +1221,7 @@ bool CanDriverHW::onRecover(can_driver::Recover::Request &req,
         }
         if (allHealthy) {
             holdCommandsForLifecycleTransition();
+            armFreshCommandLatch();
             const auto transition = lifecycleCoordinator_.RequestRecover();
             res.success = transition.ok;
             res.message = transition.ok ? "Recovered (standby)."
@@ -1223,6 +1295,7 @@ bool CanDriverHW::onEnable(std_srvs::Trigger::Request & /*req*/,
     }
 
     holdCommandsForLifecycleTransition();
+    armFreshCommandLatch();
     res.success = true;
     res.message = "enabled (armed)";
     return true;
@@ -1290,6 +1363,9 @@ bool CanDriverHW::onResume(std_srvs::Trigger::Request & /*req*/,
     }
 
     const auto transition = lifecycleCoordinator_.RequestRelease();
+    if (transition.ok) {
+        armFreshCommandLatch();
+    }
     res.success = transition.ok;
     res.message = transition.ok ? "resumed"
                                 : (transition.message.empty() ? "resume failed"
