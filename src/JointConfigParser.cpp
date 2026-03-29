@@ -64,9 +64,9 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         jc.name = static_cast<std::string>(jv["name"]);
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
-        if (jc.controlMode != "velocity" && jc.controlMode != "position") {
+        if (jc.controlMode != "velocity" && jc.controlMode != "position" && jc.controlMode != "csp") {
             errorMsg = "Joint '" + jc.name + "': unknown control_mode '" + jc.controlMode +
-                       "' (use velocity or position).";
+                       "' (use velocity, position, or csp).";
             return false;
         }
 
