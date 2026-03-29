@@ -51,6 +51,11 @@ public:
         return true;
     }
 
+    bool quickSetPosition(MotorID motorId, int32_t position) override
+    {
+        return setPosition(motorId, position);
+    }
+
     bool Enable(MotorID motorId) override
     {
         std::lock_guard<std::mutex> lock(mutex_);

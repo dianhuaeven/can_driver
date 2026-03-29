@@ -19,6 +19,7 @@ public:
     bool setAcceleration(MotorID, int32_t) override { return true; }
     bool setDeceleration(MotorID, int32_t) override { return true; }
     bool setPosition(MotorID, int32_t) override { return true; }
+    bool quickSetPosition(MotorID, int32_t) override { return true; }
 
     bool Enable(MotorID motorId) override
     {
