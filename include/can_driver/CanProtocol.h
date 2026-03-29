@@ -14,11 +14,13 @@ public:
      * @brief 电机运行模式
      *
      * Position 代表位置环（如点到点控制），Velocity 代表速度环（连续转速）。
+     * CSP 代表周期同步位置模式（Cyclic Synchronous Position）。
      * 若具体协议支持更多模式，可以在派生类中转译后再调用 setMode。
      */
     enum class MotorMode : uint8_t {
         Position = 0,
         Velocity = 1,
+        CSP = 5,
     };
 
     virtual ~CanProtocol() = default;
@@ -65,6 +67,15 @@ public:
      * 通常用于位置模式，速度模式可以选择忽略或复用该接口实现为位置跟随。
      */
     virtual bool setPosition(MotorID motorId, int32_t position) = 0;
+
+    /**
+     * @brief 快写位置命令（用于 CSP 模式）
+     * @param motorId 电机 ID
+     * @param position 目标位置（协议原始单位）
+     * @return 成功返回 true，失败返回 false
+     * @note 使用 CMD=0x05 快写命令，无需等待返回确认
+     */
+    virtual bool quickSetPosition(MotorID motorId, int32_t position) = 0;
 
     /**
      * @brief 使能指定电机
