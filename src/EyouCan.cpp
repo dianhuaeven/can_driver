@@ -167,7 +167,23 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
-    const uint32_t modeValue = mode == MotorMode::Velocity ? 0x00000003 : 0x00000001;
+
+    uint32_t modeValue;
+    switch (mode) {
+        case MotorMode::Position:
+            modeValue = 0x00000001;
+            break;
+        case MotorMode::Velocity:
+            modeValue = 0x00000003;
+            break;
+        case MotorMode::CSP:
+            modeValue = 0x00000005;
+            break;
+        default:
+            ROS_ERROR("[EyouCan] Unknown control mode");
+            return false;
+    }
+
     sendWriteCommand(motorId, 0x0F, modeValue, 4);
     return true;
 }
