@@ -138,9 +138,9 @@ SocketCanController::Stats SocketCanController::snapshotStats() const {
   return stats;
 }
 
-void SocketCanController::send(const CanTransport::Frame &frame) {
+CanTransport::SendResult SocketCanController::send(const CanTransport::Frame &frame) {
   if (!initialized_.load() || socketFd_ < 0) {
-    return;
+    return SendResult::Error;
   }
 
   const struct can_frame socketFrame = toLinuxCanFrame(frame);
@@ -163,7 +163,7 @@ void SocketCanController::send(const CanTransport::Frame &frame) {
                                << ", rx_error=" << stats.rxError
                                << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
                                << "}");
-      return;
+      return SendResult::Backpressure;
     }
     if (isLinkUnavailableSendError(errorCode)) {
       txLinkUnavailableCount_.fetch_add(1, std::memory_order_relaxed);
@@ -180,7 +180,7 @@ void SocketCanController::send(const CanTransport::Frame &frame) {
                                << ", rx_error=" << stats.rxError
                                << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
                                << "}");
-      return;
+      return SendResult::LinkDown;
     }
 
     txErrorCount_.fetch_add(1, std::memory_order_relaxed);
@@ -195,7 +195,7 @@ void SocketCanController::send(const CanTransport::Frame &frame) {
                               << ", rx_error=" << stats.rxError
                               << ", last_rx_age_ms=" << lastRxAgeMs(stats.lastRxSteadyNs)
                               << "}");
-    return;
+    return SendResult::Error;
   }
 
   if (written != static_cast<ssize_t>(sizeof(socketFrame))) {
@@ -203,10 +203,11 @@ void SocketCanController::send(const CanTransport::Frame &frame) {
     ROS_ERROR_STREAM_THROTTLE(1.0,
                               "[SocketCanController] Partial send on " << deviceName_
                               << ": " << written << " bytes");
-    return;
+    return SendResult::Error;
   }
 
   txOkCount_.fetch_add(1, std::memory_order_relaxed);
+  return SendResult::Ok;
 }
 
 bool SocketCanController::shouldEnableLocalLoopback() {

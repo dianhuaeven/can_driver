@@ -15,9 +15,10 @@ namespace {
 // Mock 传输层，隔离 MtCan 协议编解码逻辑。
 class MockTransport : public CanTransport {
 public:
-    void send(const Frame &frame) override
+    SendResult send(const Frame &frame) override
     {
         sentFrames.push_back(frame);
+        return SendResult::Ok;
     }
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override

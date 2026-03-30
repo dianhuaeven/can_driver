@@ -30,10 +30,10 @@ DeviceRuntime::~DeviceRuntime()
 void DeviceRuntime::submit(const Request &request)
 {
     bool accepted = false;
-    std::uint64_t droppedQuery = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (stopRequested_) {
+            // Runtime is shutting down — count as dropped.
             switch (request.category) {
             case Category::Control:
                 droppedControlCount_.fetch_add(1, std::memory_order_relaxed);
@@ -48,13 +48,17 @@ void DeviceRuntime::submit(const Request &request)
                 droppedQueryCount_.fetch_add(1, std::memory_order_relaxed);
                 break;
             }
+        } else if (request.category == Category::Control) {
+            // Control frames use "drop-oldest, keep-newest" eviction.
+            enqueueControlLocked(request);
+            submittedCount_.fetch_add(1, std::memory_order_relaxed);
+            accepted = true;
         } else {
             Queue &queue = queueFor(request.category);
             if (queue.size() >= maxDepthFor(request.category)) {
                 switch (request.category) {
                 case Category::Control:
-                    droppedControlCount_.fetch_add(1, std::memory_order_relaxed);
-                    break;
+                    break; // handled above
                 case Category::Recover:
                     droppedRecoverCount_.fetch_add(1, std::memory_order_relaxed);
                     break;
@@ -71,7 +75,6 @@ void DeviceRuntime::submit(const Request &request)
                 accepted = true;
             }
         }
-        droppedQuery = droppedQueryCount_.load(std::memory_order_relaxed);
     }
 
     if (!accepted) {
@@ -82,12 +85,22 @@ void DeviceRuntime::submit(const Request &request)
             << " because queue is full or runtime is stopping"
             << " stats={submitted=" << submittedCount_.load(std::memory_order_relaxed)
             << ", sent=" << sentCount_.load(std::memory_order_relaxed)
-            << ", dropped_query=" << droppedQuery
-            << ", pending=" << snapshotStats().pendingTotal << "}");
+            << ", dropped_query=" << droppedQueryCount_.load(std::memory_order_relaxed)
+            << "}");
         return;
     }
 
     cv_.notify_one();
+}
+
+void DeviceRuntime::enqueueControlLocked(const Request &request)
+{
+    if (controlQueue_.size() >= options_.maxControlQueueDepth) {
+        // Evict the oldest control frame to make room for the newest.
+        controlQueue_.pop_front();
+        evictedControlCount_.fetch_add(1, std::memory_order_relaxed);
+    }
+    controlQueue_.push_back(request);
 }
 
 void DeviceRuntime::start()
@@ -106,11 +119,7 @@ void DeviceRuntime::shutdown()
 {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!started_) {
-            stopRequested_ = true;
-        } else {
-            stopRequested_ = true;
-        }
+        stopRequested_ = true;
     }
     cv_.notify_all();
     idleCv_.notify_all();
@@ -137,10 +146,14 @@ DeviceRuntime::Stats DeviceRuntime::snapshotStats() const
     Stats stats;
     stats.submitted = submittedCount_.load(std::memory_order_relaxed);
     stats.sent = sentCount_.load(std::memory_order_relaxed);
+    stats.sendBackpressure = sendBackpressureCount_.load(std::memory_order_relaxed);
+    stats.sendLinkDown = sendLinkDownCount_.load(std::memory_order_relaxed);
+    stats.sendError = sendErrorCount_.load(std::memory_order_relaxed);
     stats.droppedControl = droppedControlCount_.load(std::memory_order_relaxed);
     stats.droppedRecover = droppedRecoverCount_.load(std::memory_order_relaxed);
     stats.droppedConfig = droppedConfigCount_.load(std::memory_order_relaxed);
     stats.droppedQuery = droppedQueryCount_.load(std::memory_order_relaxed);
+    stats.evictedControl = evictedControlCount_.load(std::memory_order_relaxed);
     {
         std::lock_guard<std::mutex> lock(mutex_);
         stats.pendingControl = controlQueue_.size();
@@ -156,6 +169,8 @@ DeviceRuntime::Stats DeviceRuntime::snapshotStats() const
 
 void DeviceRuntime::workerLoop()
 {
+    std::size_t consecutiveBackpressure = 0;
+
     for (;;) {
         Request request;
         {
@@ -176,10 +191,45 @@ void DeviceRuntime::workerLoop()
             sending_ = true;
         }
 
+        // --- Attempt send and handle result ---
+        CanTransport::SendResult result = CanTransport::SendResult::Error;
         if (transport_) {
-            transport_->send(request.frame);
+            result = transport_->send(request.frame);
         }
-        sentCount_.fetch_add(1, std::memory_order_relaxed);
+
+        switch (result) {
+        case CanTransport::SendResult::Ok:
+            sentCount_.fetch_add(1, std::memory_order_relaxed);
+            consecutiveBackpressure = 0;
+            break;
+
+        case CanTransport::SendResult::Backpressure:
+            sendBackpressureCount_.fetch_add(1, std::memory_order_relaxed);
+            ++consecutiveBackpressure;
+            if (consecutiveBackpressure >= options_.maxBackpressureRetries) {
+                // Back off: sleep briefly to let the kernel TX queue drain.
+                ROS_WARN_STREAM_THROTTLE(
+                    1.0,
+                    "[DeviceRuntime] " << consecutiveBackpressure
+                    << " consecutive backpressure events on " << deviceName_
+                    << ", sleeping " << options_.backpressureSleepUs.count() << "us");
+                std::this_thread::sleep_for(options_.backpressureSleepUs);
+                consecutiveBackpressure = 0;
+            }
+            // Frame is lost (already counted by transport); move on.
+            break;
+
+        case CanTransport::SendResult::LinkDown:
+            sendLinkDownCount_.fetch_add(1, std::memory_order_relaxed);
+            consecutiveBackpressure = 0;
+            // Frame is lost; link-level recovery is outside our scope.
+            break;
+
+        case CanTransport::SendResult::Error:
+            sendErrorCount_.fetch_add(1, std::memory_order_relaxed);
+            consecutiveBackpressure = 0;
+            break;
+        }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);

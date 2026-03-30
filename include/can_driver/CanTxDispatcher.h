@@ -36,7 +36,7 @@ public:
     void submit(const Request &request) override
     {
         if (transport_) {
-            transport_->send(request.frame);
+            (void)transport_->send(request.frame);
         }
     }
 

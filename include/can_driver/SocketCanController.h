@@ -46,7 +46,7 @@ public:
 
     void shutdown();
 
-    void send(const CanTransport::Frame &frame) override;
+    SendResult send(const CanTransport::Frame &frame) override;
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override;
     void removeReceiveHandler(std::size_t handlerId) override;

@@ -21,16 +21,26 @@ public:
         std::size_t maxRecoverQueueDepth{128};
         std::size_t maxConfigQueueDepth{128};
         std::size_t maxQueryQueueDepth{64};
+
+        /// Maximum consecutive backpressure events before the worker sleeps.
+        std::size_t maxBackpressureRetries{3};
+        /// How long to sleep after maxBackpressureRetries consecutive EAGAIN.
+        std::chrono::microseconds backpressureSleepUs{500};
+
         bool autostart{true};
     };
 
     struct Stats {
         std::uint64_t submitted{0};
         std::uint64_t sent{0};
+        std::uint64_t sendBackpressure{0};
+        std::uint64_t sendLinkDown{0};
+        std::uint64_t sendError{0};
         std::uint64_t droppedControl{0};
         std::uint64_t droppedRecover{0};
         std::uint64_t droppedConfig{0};
         std::uint64_t droppedQuery{0};
+        std::uint64_t evictedControl{0};
         std::size_t pendingControl{0};
         std::size_t pendingRecover{0};
         std::size_t pendingConfig{0};
@@ -63,6 +73,7 @@ private:
     const Queue &queueFor(Category category) const;
     std::size_t maxDepthFor(Category category) const;
     const char *categoryName(Category category) const;
+    void enqueueControlLocked(const Request &request);
 
     std::shared_ptr<CanTransport> transport_;
     const std::string deviceName_;
@@ -82,10 +93,14 @@ private:
 
     std::atomic<std::uint64_t> submittedCount_{0};
     std::atomic<std::uint64_t> sentCount_{0};
+    std::atomic<std::uint64_t> sendBackpressureCount_{0};
+    std::atomic<std::uint64_t> sendLinkDownCount_{0};
+    std::atomic<std::uint64_t> sendErrorCount_{0};
     std::atomic<std::uint64_t> droppedControlCount_{0};
     std::atomic<std::uint64_t> droppedRecoverCount_{0};
     std::atomic<std::uint64_t> droppedConfigCount_{0};
     std::atomic<std::uint64_t> droppedQueryCount_{0};
+    std::atomic<std::uint64_t> evictedControlCount_{0};
 };
 
 #endif // CAN_DRIVER_DEVICE_RUNTIME_H

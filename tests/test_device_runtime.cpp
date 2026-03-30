@@ -4,6 +4,7 @@
 #include "can_driver/DeviceRuntime.h"
 
 #include <chrono>
+#include <deque>
 #include <mutex>
 #include <set>
 #include <thread>
@@ -13,11 +14,20 @@ namespace {
 
 class MockTransport : public CanTransport {
 public:
-    void send(const Frame &frame) override
+    SendResult send(const Frame &frame) override
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        sentFrames_.push_back(frame);
+        auto result = nextResult_;
+        if (!queuedResults_.empty()) {
+            result = queuedResults_.front();
+            queuedResults_.pop_front();
+        }
+        if (result == SendResult::Ok) {
+            sentFrames_.push_back(frame);
+        }
         senderThreads_.insert(std::this_thread::get_id());
+        ++sendCallCount_;
+        return result;
     }
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override
@@ -45,10 +55,31 @@ public:
         return senderThreads_.size();
     }
 
+    std::size_t totalSendCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return sendCallCount_;
+    }
+
+    void setNextResult(SendResult result)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        nextResult_ = result;
+    }
+
+    void queueResult(SendResult result)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        queuedResults_.push_back(result);
+    }
+
 private:
     mutable std::mutex mutex_;
     std::vector<Frame> sentFrames_;
     std::set<std::thread::id> senderThreads_;
+    std::size_t sendCallCount_{0};
+    SendResult nextResult_{SendResult::Ok};
+    std::deque<SendResult> queuedResults_;
     ReceiveHandler receiveHandler_;
 };
 
@@ -143,4 +174,97 @@ TEST_F(DeviceRuntimeTest, UsesSingleWorkerThreadForAllTransmissions)
     const auto frames = transport->snapshotFrames();
     EXPECT_EQ(frames.size(), 32u);
     EXPECT_EQ(transport->senderThreadCount(), 1u);
+}
+
+TEST_F(DeviceRuntimeTest, ControlQueueEvictsOldestWhenFull)
+{
+    auto transport = std::make_shared<MockTransport>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    options.maxControlQueueDepth = 2;
+    DeviceRuntime runtime(transport, "test_can0", options);
+
+    // Submit 3 control frames into a queue of depth 2.
+    // The oldest (0x01) should be evicted.
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Control, "old"});
+    runtime.submit({makeFrame(0x02), CanTxDispatcher::Category::Control, "mid"});
+    runtime.submit({makeFrame(0x03), CanTxDispatcher::Category::Control, "new"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(200)));
+
+    const auto frames = transport->snapshotFrames();
+    ASSERT_EQ(frames.size(), 2u);
+    // Oldest was evicted, we should see mid then new.
+    EXPECT_EQ(frames[0].id, 0x02u);
+    EXPECT_EQ(frames[1].id, 0x03u);
+
+    const auto stats = runtime.snapshotStats();
+    EXPECT_EQ(stats.evictedControl, 1u);
+    // The new frame was NOT dropped — it was accepted. droppedControl should be 0.
+    EXPECT_EQ(stats.droppedControl, 0u);
+}
+
+TEST_F(DeviceRuntimeTest, BackpressureCountedInStats)
+{
+    auto transport = std::make_shared<MockTransport>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    options.maxBackpressureRetries = 100; // high so we don't trigger sleep in test
+    DeviceRuntime runtime(transport, "test_can0", options);
+
+    // First frame will fail with backpressure.
+    transport->setNextResult(CanTransport::SendResult::Backpressure);
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Control, "bp_frame"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(200)));
+
+    const auto stats = runtime.snapshotStats();
+    EXPECT_EQ(stats.sendBackpressure, 1u);
+    EXPECT_EQ(stats.sent, 0u);
+    // Frame was submitted but not successfully sent.
+    EXPECT_EQ(stats.submitted, 1u);
+}
+
+TEST_F(DeviceRuntimeTest, LinkDownCountedInStats)
+{
+    auto transport = std::make_shared<MockTransport>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    DeviceRuntime runtime(transport, "test_can0", options);
+
+    transport->setNextResult(CanTransport::SendResult::LinkDown);
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Query, "link_test"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(200)));
+
+    const auto stats = runtime.snapshotStats();
+    EXPECT_EQ(stats.sendLinkDown, 1u);
+    EXPECT_EQ(stats.sent, 0u);
+}
+
+TEST_F(DeviceRuntimeTest, MixedResultsCountedCorrectly)
+{
+    auto transport = std::make_shared<MockTransport>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    options.maxBackpressureRetries = 100;
+    DeviceRuntime runtime(transport, "test_can0", options);
+
+    // Queue: control (will fail BP), query (will succeed).
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Control, "will_fail"});
+    runtime.submit({makeFrame(0x02), CanTxDispatcher::Category::Query, "will_ok"});
+    transport->queueResult(CanTransport::SendResult::Backpressure);
+    transport->queueResult(CanTransport::SendResult::Ok);
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(500)));
+
+    const auto stats = runtime.snapshotStats();
+    EXPECT_EQ(stats.submitted, 2u);
+    EXPECT_EQ(stats.sendBackpressure, 1u);
+    EXPECT_EQ(stats.sent, 1u);
+    EXPECT_EQ(transport->totalSendCalls(), 2u);
 }

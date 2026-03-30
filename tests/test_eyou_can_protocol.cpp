@@ -14,9 +14,10 @@ namespace {
 // 轻量 mock：只验证协议层编码/解码，不依赖真实 socketcan。
 class MockTransport : public CanTransport {
 public:
-    void send(const Frame &frame) override
+    SendResult send(const Frame &frame) override
     {
         sentFrames.push_back(frame);
+        return SendResult::Ok;
     }
 
     std::size_t addReceiveHandler(ReceiveHandler handler) override
