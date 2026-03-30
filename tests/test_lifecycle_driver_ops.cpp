@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "can_driver/IDeviceManager.h"
+#include "can_driver/SharedDriverState.h"
 #include "can_driver/lifecycle_driver_ops.hpp"
 
 #include <map>
@@ -144,7 +145,8 @@ class FakeDeviceManager : public IDeviceManager {
 public:
     FakeDeviceManager()
         : protocol_(std::make_shared<FakeProtocol>()),
-          mutex_(std::make_shared<std::mutex>())
+          mutex_(std::make_shared<std::mutex>()),
+          sharedState_(std::make_shared<can_driver::SharedDriverState>())
     {
     }
 
@@ -182,8 +184,13 @@ public:
     }
 
     std::size_t deviceCount() const override { return 1; }
+    std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const override
+    {
+        return sharedState_;
+    }
 
     std::shared_ptr<FakeProtocol> protocol() const { return protocol_; }
+    std::shared_ptr<can_driver::SharedDriverState> sharedState() const { return sharedState_; }
 
     void setReady(bool ready) { ready_ = ready; }
     void setInitResult(bool result) { initResult_ = result; }
@@ -195,6 +202,7 @@ public:
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState_;
     bool ready_{true};
     bool initResult_{true};
     int shutdownCalls_{0};
@@ -309,6 +317,47 @@ TEST(LifecycleDriverOpsTest, MotionHealthyRequiresReadyDeviceAndClearedFaults)
     detail.clear();
     EXPECT_TRUE(ops.motionHealthy(&detail));
     EXPECT_TRUE(detail.empty());
+}
+
+TEST(LifecycleDriverOpsTest, MotionHealthyUsesSharedStateDegradationBeforeProtocolFallback)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_a", "fake0", CanType::MT, static_cast<MotorID>(0x141)},
+    });
+
+    deviceManager->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->consecutiveTimeoutCount = 2;
+        });
+
+    std::string detail;
+    EXPECT_FALSE(ops.motionHealthy(&detail));
+    EXPECT_EQ(detail, "Feedback degraded.");
+}
+
+TEST(LifecycleDriverOpsTest, AnyFaultActiveUsesSharedStateFeedback)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_a", "fake0", CanType::MT, static_cast<MotorID>(0x141)},
+    });
+
+    deviceManager->protocol()->setFault(0x141, false);
+    deviceManager->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->fault = true;
+        });
+
+    EXPECT_TRUE(ops.anyFaultActive());
 }
 
 } // namespace

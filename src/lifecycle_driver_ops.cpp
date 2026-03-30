@@ -1,4 +1,5 @@
 #include "can_driver/lifecycle_driver_ops.hpp"
+#include "can_driver/SharedDriverState.h"
 
 #include <chrono>
 #include <thread>
@@ -106,11 +107,30 @@ bool LifecycleDriverOps::isDeviceReady(const std::string &device) const
     return deviceManager_ && deviceManager_->isDeviceReady(device);
 }
 
+std::shared_ptr<SharedDriverState> LifecycleDriverOps::getSharedDriverState() const
+{
+    if (!deviceManager_) {
+        return nullptr;
+    }
+    return deviceManager_->getSharedDriverState();
+}
+
 bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &target,
                                          bool *hasFault) const
 {
     if (!hasFault) {
         return false;
+    }
+
+    if (const auto sharedState = getSharedDriverState()) {
+        SharedDriverState::AxisFeedbackState feedback;
+        if (sharedState->getAxisFeedback(
+                MakeAxisKey(target.canDevice, target.protocol, target.motorId),
+                &feedback) &&
+            feedback.feedbackSeen) {
+            *hasFault = feedback.fault;
+            return true;
+        }
     }
 
     auto proto = getProtocol(target.canDevice, target.protocol);
@@ -291,6 +311,27 @@ bool LifecycleDriverOps::motionHealthy(std::string *detail) const
                 *detail = "CAN device not ready.";
             }
             return false;
+        }
+        if (const auto sharedState = getSharedDriverState()) {
+            SharedDriverState::AxisFeedbackState feedback;
+            if (sharedState->getAxisFeedback(
+                    MakeAxisKey(target.canDevice, target.protocol, target.motorId),
+                    &feedback) &&
+                feedback.feedbackSeen) {
+                if (feedback.consecutiveTimeoutCount > 0) {
+                    if (detail) {
+                        *detail = "Feedback degraded.";
+                    }
+                    return false;
+                }
+                if (feedback.fault) {
+                    if (detail) {
+                        *detail = "Fault still active.";
+                    }
+                    return false;
+                }
+                continue;
+            }
         }
         bool hasFault = false;
         if (!queryMotorFault(target, &hasFault)) {

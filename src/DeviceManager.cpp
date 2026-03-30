@@ -21,6 +21,19 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
 
     transports_[device] = transport;
     txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
+    if (sharedState_) {
+        const auto stats = transport->snapshotStats();
+        sharedState_->mutateDeviceHealth(
+            device,
+            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = true;
+                health->txBackpressure = stats.txBackpressure;
+                health->txLinkUnavailable = stats.txLinkUnavailable;
+                health->txError = stats.txError;
+                health->rxError = stats.rxError;
+                health->lastRxSteadyNs = stats.lastRxSteadyNs;
+            });
+    }
     // 同步创建该设备的命令互斥锁，供上层 write() 串行下发命令使用。
     deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     ROS_INFO("[CanDriverHW] Opened CAN device '%s'.", device.c_str());
@@ -46,11 +59,13 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
     // 按协议类型按需懒加载实例。
     if (type == CanType::MT) {
         if (mtProtocols_.find(device) == mtProtocols_.end()) {
-            mtProtocols_[device] = std::make_shared<MtCan>(transport, txDispatcher);
+            mtProtocols_[device] =
+                std::make_shared<MtCan>(transport, txDispatcher, sharedState_, device);
         }
     } else {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
-            auto eyou = std::make_shared<EyouCan>(transport, txDispatcher);
+            auto eyou =
+                std::make_shared<EyouCan>(transport, txDispatcher, sharedState_, device);
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
             eyouProtocols_[device] = std::move(eyou);
         }
@@ -90,6 +105,22 @@ bool DeviceManager::initDevice(const std::string &device,
     if (txDispatchers_.find(device) == txDispatchers_.end()) {
         txDispatchers_[device] = std::make_shared<DeviceRuntime>(transportIt->second, device);
     }
+    if (sharedState_) {
+        for (const auto &entry : motors) {
+            sharedState_->registerAxis(device, entry.first, entry.second);
+        }
+        const auto stats = transportIt->second->snapshotStats();
+        sharedState_->mutateDeviceHealth(
+            device,
+            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = true;
+                health->txBackpressure = stats.txBackpressure;
+                health->txLinkUnavailable = stats.txLinkUnavailable;
+                health->txError = stats.txError;
+                health->rxError = stats.rxError;
+                health->lastRxSteadyNs = stats.lastRxSteadyNs;
+            });
+    }
 
     // 按协议拆分电机列表，避免不必要地创建协议实例。
     std::vector<MotorID> mtIds;
@@ -103,10 +134,12 @@ bool DeviceManager::initDevice(const std::string &device,
     }
     // 初始化协议对象并启动状态刷新任务。
     if (!mtIds.empty() && mtProtocols_.find(device) == mtProtocols_.end()) {
-        mtProtocols_[device] = std::make_shared<MtCan>(transportIt->second, txDispatchers_[device]);
+        mtProtocols_[device] = std::make_shared<MtCan>(
+            transportIt->second, txDispatchers_[device], sharedState_, device);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
-        auto eyou = std::make_shared<EyouCan>(transportIt->second, txDispatchers_[device]);
+        auto eyou = std::make_shared<EyouCan>(
+            transportIt->second, txDispatchers_[device], sharedState_, device);
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyouProtocols_[device] = std::move(eyou);
     }
@@ -172,6 +205,22 @@ void DeviceManager::setPpFastWriteEnabled(bool enabled)
 void DeviceManager::shutdownAll()
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (sharedState_) {
+        for (const auto &kv : transports_) {
+            const auto stats =
+                kv.second ? kv.second->snapshotStats() : SocketCanController::Stats {};
+            sharedState_->mutateDeviceHealth(
+                kv.first,
+                [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
+                    health->transportReady = false;
+                    health->txBackpressure = stats.txBackpressure;
+                    health->txLinkUnavailable = stats.txLinkUnavailable;
+                    health->txError = stats.txError;
+                    health->rxError = stats.rxError;
+                    health->lastRxSteadyNs = stats.lastRxSteadyNs;
+                });
+        }
+    }
     // 先释放协议（包含内部线程/handler），再关闭 transport。
     mtProtocols_.clear();
     eyouProtocols_.clear();
@@ -221,11 +270,31 @@ bool DeviceManager::isDeviceReady(const std::string &device) const
     if (it == transports_.end() || !it->second) {
         return false;
     }
-    return it->second->isReady();
+    const bool ready = it->second->isReady();
+    if (sharedState_) {
+        const auto stats = it->second->snapshotStats();
+        sharedState_->mutateDeviceHealth(
+            device,
+            [ready, &stats](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = ready;
+                health->txBackpressure = stats.txBackpressure;
+                health->txLinkUnavailable = stats.txLinkUnavailable;
+                health->txError = stats.txError;
+                health->rxError = stats.rxError;
+                health->lastRxSteadyNs = stats.lastRxSteadyNs;
+            });
+    }
+    return ready;
 }
 
 std::size_t DeviceManager::deviceCount() const
 {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return transports_.size();
+}
+
+std::shared_ptr<can_driver::SharedDriverState> DeviceManager::getSharedDriverState() const
+{
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    return sharedState_;
 }

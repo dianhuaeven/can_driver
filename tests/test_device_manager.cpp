@@ -62,6 +62,17 @@ TEST_F(RosTimeFixture, GetProtocolReturnsNullBeforeEnsure)
     EXPECT_EQ(dm.getProtocol("vcan0", CanType::MT), nullptr);
 }
 
+TEST_F(RosTimeFixture, SharedDriverStateIsStableAndAvailable)
+{
+    DeviceManager dm;
+
+    const auto first = dm.getSharedDriverState();
+    const auto second = dm.getSharedDriverState();
+
+    ASSERT_NE(first, nullptr);
+    EXPECT_EQ(first, second);
+}
+
 TEST_F(RosTimeFixture, EnsureProtocolCreatesProtocol)
 {
     if (!hasVcan0()) {

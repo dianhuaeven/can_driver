@@ -48,6 +48,7 @@ private:
     std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const;
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
     bool isDeviceReady(const std::string &device) const;
+    std::shared_ptr<SharedDriverState> getSharedDriverState() const;
 
     std::shared_ptr<IDeviceManager> deviceManager_;
     const MotorActionExecutor *motorActionExecutor_{nullptr};

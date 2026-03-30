@@ -78,14 +78,24 @@ std::chrono::milliseconds EyouCan::computeRefreshSleep(std::size_t motorCount) c
 }
 
 EyouCan::EyouCan(std::shared_ptr<CanTransport> controller)
-    : EyouCan(std::move(controller), nullptr)
+    : EyouCan(std::move(controller), nullptr, nullptr, "")
 {
 }
 
 EyouCan::EyouCan(std::shared_ptr<CanTransport> controller,
                  std::shared_ptr<CanTxDispatcher> txDispatcher)
+    : EyouCan(std::move(controller), std::move(txDispatcher), nullptr, "")
+{
+}
+
+EyouCan::EyouCan(std::shared_ptr<CanTransport> controller,
+                 std::shared_ptr<CanTxDispatcher> txDispatcher,
+                 std::shared_ptr<can_driver::SharedDriverState> sharedState,
+                 std::string deviceName)
     : canController(std::move(controller))
     , txDispatcher_(std::move(txDispatcher))
+    , sharedState_(std::move(sharedState))
+    , deviceName_(std::move(deviceName))
 {
     if (!txDispatcher_ && canController) {
         txDispatcher_ = std::make_shared<DirectCanTxDispatcher>(canController);
@@ -115,6 +125,9 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
             const auto motorId = static_cast<uint8_t>(id);
             refreshMotorIds.push_back(motorId);
             managedMotorIds.insert(motorId);
+            if (sharedState_ && !deviceName_.empty()) {
+                sharedState_->registerAxis(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+            }
         }
     }
     resetReadTracking();
@@ -179,6 +192,11 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].mode = mode;
+    }
+    syncSharedCommand(motorId, 0, 0, mode, true);
 
     uint32_t modeValue;
     switch (mode) {
@@ -207,6 +225,11 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].commandedVelocity = velocity;
+    }
+    syncSharedCommand(motorId, 0, velocity, MotorMode::Velocity, true);
     const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
     if (fastWrite) {
         // 兼容策略：先发快写，再补发普通写。
@@ -250,6 +273,11 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].commandedPosition = position;
+    }
+    syncSharedCommand(motorId, position, 0, MotorMode::Position, true);
     const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
     // 协议示例：先设置速度，再设置位置（位置模式需目标速度）
     // 10 RPM = 10 * 65536 / 60 ≈ 10922.666，取 0x00002AAA
@@ -273,6 +301,11 @@ bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].commandedPosition = position;
+    }
+    syncSharedCommand(motorId, position, 0, MotorMode::CSP, true);
     // CSP 模式：使用快写命令（CMD=0x05），只发送位置帧，无需等待返回
     sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
     return true;
@@ -285,6 +318,7 @@ bool EyouCan::Enable(MotorID Id)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Enable);
     sendWriteCommand(motorId, 0x10, 0x00000001, 4);
     return true;
 }
@@ -296,6 +330,7 @@ bool EyouCan::Disable(MotorID Id)
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Disable);
     sendWriteCommand(motorId, 0x10, 0x00000000, 4);
     return true;
 }
@@ -307,6 +342,7 @@ bool EyouCan::Stop(MotorID Id)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Hold);
     sendWriteCommand(motorId, 0x11, 0x00000001, 4);
     return true;
 }
@@ -318,6 +354,7 @@ bool EyouCan::ResetFault(MotorID Id)
     }
     const uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Recover);
     sendWriteCommand(motorId, 0x15, 0x00000000, 4);
     markReadResponseReceived(motorId, 0x15);
     requestFault(motorId);
@@ -564,6 +601,7 @@ bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
     }
 
     if (delayRetry) {
+        noteSharedTimeout(motorId, consecutiveTimeouts);
         ROS_WARN_STREAM_THROTTLE(
             1.0,
             "[EyouCan] Read timeout on motor " << static_cast<unsigned>(motorId)
@@ -587,6 +625,81 @@ void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
         it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
         it->second.consecutiveTimeouts = 0;
     }
+}
+
+can_driver::SharedDriverState::AxisKey EyouCan::makeAxisKey(uint8_t motorId) const
+{
+    return can_driver::MakeAxisKey(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+}
+
+void EyouCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    sharedState_->mutateAxisFeedback(
+        makeAxisKey(motorId),
+        [&](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->position = state.position;
+            feedback->velocity = state.actualVelocity;
+            feedback->current = state.current;
+            feedback->mode = state.mode;
+            feedback->positionValid = state.positionReceived;
+            feedback->velocityValid = state.velocityReceived;
+            feedback->currentValid = state.currentReceived;
+            feedback->enabled = state.enabled;
+            feedback->fault = state.fault;
+            feedback->feedbackSeen = true;
+            feedback->lastRxSteadyNs = nowNs;
+            feedback->lastValidStateSteadyNs = nowNs;
+            feedback->consecutiveTimeoutCount = 0;
+        });
+}
+
+void EyouCan::syncSharedCommand(uint8_t motorId,
+                                int64_t targetPosition,
+                                int32_t targetVelocity,
+                                MotorMode desiredMode,
+                                bool valid) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    sharedState_->mutateAxisCommand(
+        makeAxisKey(motorId),
+        [&](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->targetPosition = targetPosition;
+            command->targetVelocity = targetVelocity;
+            command->desiredMode = desiredMode;
+            command->valid = valid;
+            command->lastCommandSteadyNs = nowNs;
+        });
+}
+
+void EyouCan::syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+    sharedState_->setAxisIntent(makeAxisKey(motorId), intent);
+}
+
+void EyouCan::noteSharedTimeout(uint8_t motorId, std::size_t consecutiveTimeouts) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    sharedState_->mutateAxisFeedback(
+        makeAxisKey(motorId),
+        [consecutiveTimeouts](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->consecutiveTimeoutCount =
+                static_cast<std::uint32_t>(consecutiveTimeouts);
+        });
 }
 
 void EyouCan::resetReadTracking()
@@ -645,6 +758,8 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
     bool resyncMode = false;
     bool resyncEnable = false;
     bool resyncCurrent = false;
+    bool sharedFeedbackUpdated = false;
+    MotorState sharedFeedbackSnapshot;
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -728,7 +843,13 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
             default:
                 break;
             }
+            sharedFeedbackSnapshot = state;
+            sharedFeedbackUpdated = true;
         }
+    }
+
+    if (sharedFeedbackUpdated) {
+        syncSharedFeedback(motorId, sharedFeedbackSnapshot);
     }
 
     if (resyncPosition) {
@@ -761,6 +882,9 @@ void EyouCan::registerManagedMotorId(uint8_t motorId) const
 {
     std::lock_guard<std::mutex> lock(refreshMutex);
     managedMotorIds.insert(motorId);
+    if (sharedState_ && !deviceName_.empty()) {
+        sharedState_->registerAxis(deviceName_, CanType::PP, static_cast<MotorID>(motorId));
+    }
 }
 
 void EyouCan::requestPosition(uint8_t motorId)

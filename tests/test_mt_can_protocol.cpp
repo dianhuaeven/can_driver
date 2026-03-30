@@ -2,6 +2,7 @@
 #include <ros/time.h>
 
 #include "can_driver/MtCan.h"
+#include "can_driver/SharedDriverState.h"
 
 #include <array>
 #include <chrono>
@@ -77,12 +78,14 @@ protected:
     MtCanTest()
         : transport(std::make_shared<MockTransport>())
         , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
-        , mt(transport, txDispatcher)
+        , sharedState(std::make_shared<can_driver::SharedDriverState>())
+        , mt(transport, txDispatcher, sharedState, "can0")
     {
     }
 
     std::shared_ptr<MockTransport> transport;
     std::shared_ptr<MockTxDispatcher> txDispatcher;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState;
     MtCan mt;
 };
 
@@ -199,6 +202,23 @@ TEST_F(MtCanTest, WritesRouteThroughUnifiedTxDispatcher)
     EXPECT_STREQ(txDispatcher->requests[0].source, "MtCan::sendFrame");
 }
 
+TEST_F(MtCanTest, CommandsPopulateSharedStateIntentAndTargets)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
+    ASSERT_TRUE(mt.Enable(kMotorId));
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    ASSERT_TRUE(sharedState->getAxisCommand(axisKey, &command));
+    EXPECT_EQ(command.targetPosition, 0);
+    EXPECT_EQ(command.targetVelocity, 4321);
+    EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Velocity);
+    EXPECT_TRUE(command.valid);
+    EXPECT_EQ(sharedState->getAxisIntent(axisKey), can_driver::AxisIntent::Enable);
+}
+
 TEST_F(MtCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)
 {
     MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
@@ -231,6 +251,35 @@ TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 
     EXPECT_EQ(mt.getCurrent(kResponseNodeId), 123);
     EXPECT_EQ(mt.getVelocity(kResponseNodeId), 600);
+}
+
+TEST_F(MtCanTest, ResponsesUpdateSharedFeedbackFreshness)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    CanTransport::Frame frame {};
+    frame.id = 0x241;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x9C;
+    frame.data[2] = 0x7B;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x58;
+    frame.data[5] = 0x02;
+
+    transport->simulateReceive(frame);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(sharedState->getAxisFeedback(axisKey, &feedback));
+    EXPECT_TRUE(feedback.feedbackSeen);
+    EXPECT_TRUE(feedback.currentValid);
+    EXPECT_TRUE(feedback.velocityValid);
+    EXPECT_EQ(feedback.current, 123);
+    EXPECT_EQ(feedback.velocity, 600);
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 0u);
+    EXPECT_GT(feedback.lastRxSteadyNs, 0);
 }
 
 TEST_F(MtCanTest, HandleResponseIgnoresExtendedFrame)
@@ -309,6 +358,13 @@ TEST_F(MtCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
     MtCanTestAccessor::expireAllPendingBackoff(mt);
     MtCanTestAccessor::refresh(mt);
     EXPECT_EQ(transport->sentFrames.size(), 6u);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(
+        sharedState->getAxisFeedback(can_driver::MakeAxisKey("can0", CanType::MT, static_cast<MotorID>(0x01)),
+                                     &feedback));
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
+    EXPECT_TRUE(feedback.degraded);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)

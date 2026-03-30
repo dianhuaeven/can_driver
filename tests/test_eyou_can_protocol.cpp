@@ -2,6 +2,7 @@
 #include <ros/time.h>
 
 #include "can_driver/EyouCan.h"
+#include "can_driver/SharedDriverState.h"
 
 #include <chrono>
 #include <cstdint>
@@ -76,12 +77,14 @@ protected:
     EyouCanTest()
         : transport(std::make_shared<MockTransport>())
         , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
-        , eyou(transport, txDispatcher)
+        , sharedState(std::make_shared<can_driver::SharedDriverState>())
+        , eyou(transport, txDispatcher, sharedState, "can0")
     {
     }
 
     std::shared_ptr<MockTransport> transport;
     std::shared_ptr<MockTxDispatcher> txDispatcher;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState;
     EyouCan eyou;
 };
 
@@ -206,6 +209,23 @@ TEST_F(EyouCanTest, WritesRouteThroughUnifiedTxDispatcher)
     EXPECT_EQ(txDispatcher->requests[1].category, CanTxDispatcher::Category::Control);
 }
 
+TEST_F(EyouCanTest, CommandsPopulateSharedStateIntentAndTargets)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+
+    ASSERT_TRUE(eyou.setPosition(kMotorId, 1234));
+    ASSERT_TRUE(eyou.Enable(kMotorId));
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    ASSERT_TRUE(sharedState->getAxisCommand(axisKey, &command));
+    EXPECT_EQ(command.targetPosition, 1234);
+    EXPECT_EQ(command.targetVelocity, 0);
+    EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Position);
+    EXPECT_TRUE(command.valid);
+    EXPECT_EQ(sharedState->getAxisIntent(axisKey), can_driver::AxisIntent::Enable);
+}
+
 TEST_F(EyouCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)
 {
     EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
@@ -253,6 +273,13 @@ TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
     EyouCanTestAccessor::expireAllPendingBackoff(eyou);
     EyouCanTestAccessor::refresh(eyou);
     EXPECT_EQ(transport->sentFrames.size(), 8u);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(
+        sharedState->getAxisFeedback(can_driver::MakeAxisKey("can0", CanType::PP, static_cast<MotorID>(0x05)),
+                                     &feedback));
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
+    EXPECT_TRUE(feedback.degraded);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)
@@ -273,6 +300,34 @@ TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(eyou.getPosition(static_cast<MotorID>(0x05)), 1000);
+}
+
+TEST_F(EyouCanTest, ReadResponsesUpdateSharedFeedbackFreshness)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+
+    CanTransport::Frame frame {};
+    frame.id = 0x0005;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.dlc = 6;
+    frame.data[0] = 0x04;
+    frame.data[1] = 0x07;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x00;
+    frame.data[4] = 0x03;
+    frame.data[5] = 0xE8;
+
+    transport->simulateReceive(frame);
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    ASSERT_TRUE(sharedState->getAxisFeedback(axisKey, &feedback));
+    EXPECT_TRUE(feedback.feedbackSeen);
+    EXPECT_TRUE(feedback.positionValid);
+    EXPECT_EQ(feedback.position, 1000);
+    EXPECT_EQ(feedback.consecutiveTimeoutCount, 0u);
+    EXPECT_GT(feedback.lastRxSteadyNs, 0);
 }
 
 TEST_F(EyouCanTest, HandleResponseIgnoresExtendedFrame)

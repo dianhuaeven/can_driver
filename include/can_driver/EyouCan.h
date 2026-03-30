@@ -2,6 +2,7 @@
 #define EyouCan_H
 #include "CanProtocol.h"
 #include "can_driver/CanTransport.h"
+#include "can_driver/SharedDriverState.h"
 #include "can_driver/CanTxDispatcher.h"
 #include <atomic>
 #include <chrono>
@@ -25,6 +26,10 @@ public:
     explicit EyouCan(std::shared_ptr<CanTransport> controller);
     EyouCan(std::shared_ptr<CanTransport> controller,
             std::shared_ptr<CanTxDispatcher> txDispatcher);
+    EyouCan(std::shared_ptr<CanTransport> controller,
+            std::shared_ptr<CanTxDispatcher> txDispatcher,
+            std::shared_ptr<can_driver::SharedDriverState> sharedState,
+            std::string deviceName);
 
     ~EyouCan();
 
@@ -135,6 +140,8 @@ private:
 
     std::shared_ptr<CanTransport> canController;
     std::shared_ptr<CanTxDispatcher> txDispatcher_;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState_;
+    std::string deviceName_;
     mutable std::unordered_map<uint8_t, MotorState> motorStates;
     mutable std::mutex stateMutex;
     std::size_t receiveHandlerId = 0;
@@ -185,6 +192,15 @@ private:
     bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
     void resetReadTracking();
+    can_driver::SharedDriverState::AxisKey makeAxisKey(uint8_t motorId) const;
+    void syncSharedFeedback(uint8_t motorId, const MotorState &state) const;
+    void syncSharedCommand(uint8_t motorId,
+                           int64_t targetPosition,
+                           int32_t targetVelocity,
+                           MotorMode desiredMode,
+                           bool valid) const;
+    void syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) const;
+    void noteSharedTimeout(uint8_t motorId, std::size_t consecutiveTimeouts) const;
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t subCommand);
     static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
                                                            std::chrono::milliseconds baseTimeout);

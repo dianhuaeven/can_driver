@@ -11,6 +11,10 @@
 #include <utility>
 #include <vector>
 
+namespace can_driver {
+class SharedDriverState;
+}
+
 class IDeviceManager {
 public:
     virtual ~IDeviceManager() = default;
@@ -30,6 +34,7 @@ public:
     virtual std::shared_ptr<CanProtocol> getProtocol(const std::string &device, CanType type) const = 0;
     virtual std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const = 0;
     virtual bool isDeviceReady(const std::string &device) const = 0;
+    virtual std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const = 0;
     virtual std::size_t deviceCount() const = 0;
 };
 

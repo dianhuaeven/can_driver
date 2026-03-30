@@ -8,6 +8,7 @@
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/MotorID.h"
 #include "can_driver/MtCan.h"
+#include "can_driver/SharedDriverState.h"
 #include "can_driver/SocketCanController.h"
 
 #include <map>
@@ -50,6 +51,7 @@ public:
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const override;
     /// 返回设备是否 ready。
     bool isDeviceReady(const std::string &device) const override;
+    std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const override;
     /// 返回传输层实例（不存在返回 nullptr）。
     std::shared_ptr<SocketCanController> getTransport(const std::string &device) const;
     /// 当前已初始化的 transport 数量。
@@ -63,6 +65,8 @@ private:
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState_{
+        std::make_shared<can_driver::SharedDriverState>()};
     bool ppFastWriteEnabled_{false};
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。
     std::map<std::string, std::shared_ptr<std::mutex>> deviceCmdMutexes_;

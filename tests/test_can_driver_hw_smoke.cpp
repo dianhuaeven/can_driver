@@ -197,6 +197,10 @@ public:
         return ready_;
     }
     std::size_t deviceCount() const override { return 1; }
+    std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const override
+    {
+        return nullptr;
+    }
 
     std::shared_ptr<FakeProtocol> protocol() const { return protocol_; }
     void setReady(bool ready)

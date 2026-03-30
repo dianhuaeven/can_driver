@@ -66,14 +66,24 @@ std::chrono::milliseconds MtCan::computeRefreshSleep(std::size_t motorCount) con
 }
 
 MtCan::MtCan(std::shared_ptr<CanTransport> controller)
-    : MtCan(std::move(controller), nullptr)
+    : MtCan(std::move(controller), nullptr, nullptr, "")
 {
 }
 
 MtCan::MtCan(std::shared_ptr<CanTransport> controller,
              std::shared_ptr<CanTxDispatcher> txDispatcher)
+    : MtCan(std::move(controller), std::move(txDispatcher), nullptr, "")
+{
+}
+
+MtCan::MtCan(std::shared_ptr<CanTransport> controller,
+             std::shared_ptr<CanTxDispatcher> txDispatcher,
+             std::shared_ptr<can_driver::SharedDriverState> sharedState,
+             std::string deviceName)
     : canController(std::move(controller))
     , txDispatcher_(std::move(txDispatcher))
+    , sharedState_(std::move(sharedState))
+    , deviceName_(std::move(deviceName))
 {
     if (!txDispatcher_ && canController) {
         txDispatcher_ = std::make_shared<DirectCanTxDispatcher>(canController);
@@ -99,7 +109,11 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
         refreshMotorIds.clear();
         refreshMotorIds.reserve(motorIds.size());
         for (MotorID id : motorIds) {
-            refreshMotorIds.push_back(static_cast<uint8_t>(id));
+            const auto motorId = static_cast<uint8_t>(id);
+            refreshMotorIds.push_back(motorId);
+            if (sharedState_ && !deviceName_.empty()) {
+                sharedState_->registerAxis(deviceName_, CanType::MT, static_cast<MotorID>(motorId));
+            }
         }
     }
     resetReadTracking();
@@ -149,8 +163,11 @@ void MtCan::setRefreshRateHz(double hz)
 bool MtCan::setMode(MotorID Id, MotorMode mode)
 {
     uint8_t motorId = static_cast<uint8_t>(Id);
-    std::lock_guard<std::mutex> stateLock(stateMutex);
-    motorStates[motorId].mode = mode;
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        motorStates[motorId].mode = mode;
+    }
+    syncSharedCommand(motorId, 0, 0, mode, true);
     return true;
 }
 
@@ -164,6 +181,7 @@ bool MtCan::setVelocity(MotorID Id, int32_t velocity)
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].commandedVelocity = velocity;
     }
+    syncSharedCommand(motorId, 0, velocity, MotorMode::Velocity, true);
     const uint16_t canId = encodeSendCanId(motorId);
 
     std::array<uint8_t, 4> payload{
@@ -291,6 +309,7 @@ bool MtCan::setPosition(MotorID Id, int32_t position)
         state.position = position;
         commandedVelocity = state.commandedVelocity;
     }
+    syncSharedCommand(motorId, position, commandedVelocity, MotorMode::Position, true);
 
     const uint16_t canId = encodeSendCanId(motorId);
 
@@ -345,6 +364,7 @@ bool MtCan::Enable(MotorID Id)
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = true;
     }
+    syncSharedIntent(motorId, can_driver::AxisIntent::Enable);
     // 脉塔协议无独立使能命令。
     // 如需设置零点请单独调用 setZeroPosition()，避免频繁写 ROM。
     return true;
@@ -361,6 +381,7 @@ bool MtCan::Disable(MotorID Id)
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].enabled = false;
     }
+    syncSharedIntent(motorId, can_driver::AxisIntent::Disable);
     const uint16_t canId = encodeSendCanId(motorId);
     sendFrame(canId, 0x80, {0, 0, 0, 0}); // Motor Off: 关闭输出，清除运行状态
     return true;
@@ -372,6 +393,7 @@ bool MtCan::Stop(MotorID Id)
         return false;
     }
     uint8_t motorId = static_cast<uint8_t>(Id);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Hold);
     const uint16_t canId = encodeSendCanId(motorId);
     sendFrame(canId, 0x81, {0, 0, 0, 0}); // Motor Stop: 停止运动，保持受控
     return true;
@@ -383,6 +405,7 @@ bool MtCan::ResetFault(MotorID Id)
         return false;
     }
     const uint8_t motorId = static_cast<uint8_t>(Id);
+    syncSharedIntent(motorId, can_driver::AxisIntent::Recover);
     resetSystem(motorId);
     markReadResponseReceived(motorId, 0x9A);
     requestError(motorId);
@@ -645,6 +668,7 @@ bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
     }
 
     if (delayRetry) {
+        noteSharedTimeout(motorId, consecutiveTimeouts);
         ROS_WARN_STREAM_THROTTLE(
             1.0,
             "[MtCan] Read timeout on motor " << static_cast<unsigned>(motorId)
@@ -667,6 +691,81 @@ void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
         it->second.nextEligibleSend = std::chrono::steady_clock::time_point {};
         it->second.consecutiveTimeouts = 0;
     }
+}
+
+can_driver::SharedDriverState::AxisKey MtCan::makeAxisKey(uint8_t motorId) const
+{
+    return can_driver::MakeAxisKey(deviceName_, CanType::MT, static_cast<MotorID>(motorId));
+}
+
+void MtCan::syncSharedFeedback(uint8_t motorId, const MotorState &state) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    sharedState_->mutateAxisFeedback(
+        makeAxisKey(motorId),
+        [&](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->position = state.multiTurnAngle;
+            feedback->velocity = state.velocity;
+            feedback->current = static_cast<std::int32_t>(std::lround(state.current * 100.0));
+            feedback->mode = state.mode;
+            feedback->positionValid = true;
+            feedback->velocityValid = true;
+            feedback->currentValid = true;
+            feedback->enabled = state.enabled;
+            feedback->fault = state.error;
+            feedback->feedbackSeen = true;
+            feedback->lastRxSteadyNs = nowNs;
+            feedback->lastValidStateSteadyNs = nowNs;
+            feedback->consecutiveTimeoutCount = 0;
+        });
+}
+
+void MtCan::syncSharedCommand(uint8_t motorId,
+                              int64_t targetPosition,
+                              int32_t targetVelocity,
+                              MotorMode desiredMode,
+                              bool valid) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    sharedState_->mutateAxisCommand(
+        makeAxisKey(motorId),
+        [&](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->targetPosition = targetPosition;
+            command->targetVelocity = targetVelocity;
+            command->desiredMode = desiredMode;
+            command->valid = valid;
+            command->lastCommandSteadyNs = nowNs;
+        });
+}
+
+void MtCan::syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+    sharedState_->setAxisIntent(makeAxisKey(motorId), intent);
+}
+
+void MtCan::noteSharedTimeout(uint8_t motorId, std::size_t consecutiveTimeouts) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    sharedState_->mutateAxisFeedback(
+        makeAxisKey(motorId),
+        [consecutiveTimeouts](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->consecutiveTimeoutCount =
+                static_cast<std::uint32_t>(consecutiveTimeouts);
+        });
 }
 
 void MtCan::resetReadTracking()
@@ -735,6 +834,8 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
     }
 
     bool shouldResetAfterZero = false;
+    bool sharedFeedbackUpdated = false;
+    MotorState sharedFeedbackSnapshot;
 
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
@@ -844,6 +945,29 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
         default:
             break;
         }
+
+        sharedFeedbackSnapshot = state;
+        switch (command) {
+        case 0x9C:
+        case 0x9A:
+        case 0x92:
+        case 0xA1:
+        case 0xA2:
+        case 0xA4:
+        case 0xA6:
+        case 0xA8:
+        case 0xA9:
+        case 0x80:
+        case 0x81:
+            sharedFeedbackUpdated = true;
+            break;
+        default:
+            break;
+        }
+    }
+
+    if (sharedFeedbackUpdated) {
+        syncSharedFeedback(nodeId, sharedFeedbackSnapshot);
     }
 
     // 设置零点后需要系统复位才能生效（在锁外调用，避免死锁）
