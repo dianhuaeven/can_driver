@@ -78,8 +78,18 @@ std::chrono::milliseconds EyouCan::computeRefreshSleep(std::size_t motorCount) c
 }
 
 EyouCan::EyouCan(std::shared_ptr<CanTransport> controller)
-    : canController(std::move(controller))
+    : EyouCan(std::move(controller), nullptr)
 {
+}
+
+EyouCan::EyouCan(std::shared_ptr<CanTransport> controller,
+                 std::shared_ptr<CanTxDispatcher> txDispatcher)
+    : canController(std::move(controller))
+    , txDispatcher_(std::move(txDispatcher))
+{
+    if (!txDispatcher_ && canController) {
+        txDispatcher_ = std::make_shared<DirectCanTxDispatcher>(canController);
+    }
     if (canController) {
         receiveHandlerId = canController->addReceiveHandler(
             [this](const CanTransport::Frame &frame) { handleResponse(frame); });
@@ -445,7 +455,11 @@ void EyouCan::sendWriteCommand(uint8_t motorId,
         frame.data[2 + i] = static_cast<uint8_t>((value >> shift) & 0xFF);
     }
 
-    canController->send(frame);
+    const auto category = (subCommand == 0x15) ? CanTxDispatcher::Category::Recover
+                                               : CanTxDispatcher::Category::Control;
+    if (!submitTx(frame, category, "EyouCan::sendWriteCommand")) {
+        return;
+    }
 
     if (commandType == kFastWriteCommand) {
         fastWriteSentCount_.fetch_add(1, std::memory_order_relaxed);
@@ -491,7 +505,26 @@ void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand)
     frame.data.fill(0);
     frame.data[0] = kReadCommand;
     frame.data[1] = subCommand;
-    canController->send(frame);
+    (void)submitTx(frame, CanTxDispatcher::Category::Query, "EyouCan::sendReadCommand");
+}
+
+bool EyouCan::submitTx(const CanTransport::Frame &frame,
+                       CanTxDispatcher::Category category,
+                       const char *source) const
+{
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(1.0,
+                                  "[EyouCan] TX dispatcher unavailable for "
+                                  << (source ? source : "unknown"));
+        return false;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = category;
+    request.source = source;
+    txDispatcher_->submit(request);
+    return true;
 }
 
 bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)

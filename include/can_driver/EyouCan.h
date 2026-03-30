@@ -2,6 +2,7 @@
 #define EyouCan_H
 #include "CanProtocol.h"
 #include "can_driver/CanTransport.h"
+#include "can_driver/CanTxDispatcher.h"
 #include <atomic>
 #include <chrono>
 #include <memory>
@@ -22,6 +23,8 @@ public:
         * @param controller 基于 CanTransport 的 CAN 传输实现（标准 8 字节帧）
      */
     explicit EyouCan(std::shared_ptr<CanTransport> controller);
+    EyouCan(std::shared_ptr<CanTransport> controller,
+            std::shared_ptr<CanTxDispatcher> txDispatcher);
 
     ~EyouCan();
 
@@ -131,6 +134,7 @@ private:
     };
 
     std::shared_ptr<CanTransport> canController;
+    std::shared_ptr<CanTxDispatcher> txDispatcher_;
     mutable std::unordered_map<uint8_t, MotorState> motorStates;
     mutable std::mutex stateMutex;
     std::size_t receiveHandlerId = 0;
@@ -175,6 +179,9 @@ private:
     std::chrono::milliseconds computeReadRequestTimeout() const;
     void stopRefreshLoop();
     void publishWriteCountersParam() const;
+    bool submitTx(const CanTransport::Frame &frame,
+                  CanTxDispatcher::Category category,
+                  const char *source) const;
     bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
     void resetReadTracking();

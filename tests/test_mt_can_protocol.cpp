@@ -47,6 +47,25 @@ public:
     ReceiveHandler receiveHandler;
 };
 
+class MockTxDispatcher : public CanTxDispatcher {
+public:
+    explicit MockTxDispatcher(std::shared_ptr<MockTransport> transport)
+        : transport(std::move(transport))
+    {
+    }
+
+    void submit(const Request &request) override
+    {
+        requests.push_back(request);
+        if (transport) {
+            transport->send(request.frame);
+        }
+    }
+
+    std::shared_ptr<MockTransport> transport;
+    std::vector<Request> requests;
+};
+
 class MtCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
@@ -56,11 +75,13 @@ protected:
 
     MtCanTest()
         : transport(std::make_shared<MockTransport>())
-        , mt(transport)
+        , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
+        , mt(transport, txDispatcher)
     {
     }
 
     std::shared_ptr<MockTransport> transport;
+    std::shared_ptr<MockTxDispatcher> txDispatcher;
     MtCan mt;
 };
 
@@ -167,6 +188,25 @@ TEST_F(MtCanTest, SetPositionWithoutVelocityUsesDefaultSpeed)
     EXPECT_EQ(frame.data[0], 0xA4);
     EXPECT_EQ(frame.data[2], 100u);
     EXPECT_EQ(frame.data[3], 0u);
+}
+
+TEST_F(MtCanTest, WritesRouteThroughUnifiedTxDispatcher)
+{
+    ASSERT_TRUE(mt.setVelocity(static_cast<MotorID>(0x01), 123));
+    ASSERT_EQ(txDispatcher->requests.size(), 1u);
+    EXPECT_EQ(txDispatcher->requests[0].category, CanTxDispatcher::Category::Control);
+    EXPECT_STREQ(txDispatcher->requests[0].source, "MtCan::sendFrame");
+}
+
+TEST_F(MtCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)
+{
+    MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
+
+    MtCanTestAccessor::refresh(mt);
+
+    ASSERT_FALSE(txDispatcher->requests.empty());
+    EXPECT_EQ(txDispatcher->requests.front().category, CanTxDispatcher::Category::Query);
+    EXPECT_STREQ(txDispatcher->requests.front().source, "MtCan::requestState");
 }
 
 TEST_F(MtCanTest, HandleResponseParsesStateFrame)

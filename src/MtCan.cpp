@@ -66,8 +66,18 @@ std::chrono::milliseconds MtCan::computeRefreshSleep(std::size_t motorCount) con
 }
 
 MtCan::MtCan(std::shared_ptr<CanTransport> controller)
-    : canController(std::move(controller))
+    : MtCan(std::move(controller), nullptr)
 {
+}
+
+MtCan::MtCan(std::shared_ptr<CanTransport> controller,
+             std::shared_ptr<CanTxDispatcher> txDispatcher)
+    : canController(std::move(controller))
+    , txDispatcher_(std::move(txDispatcher))
+{
+    if (!txDispatcher_ && canController) {
+        txDispatcher_ = std::make_shared<DirectCanTxDispatcher>(canController);
+    }
     if (canController) {
         receiveHandlerId = canController->addReceiveHandler(
             [this](const CanTransport::Frame &frame) { handleResponse(frame); });
@@ -210,7 +220,9 @@ bool MtCan::setCommunicationTimeout(uint32_t timeoutMs)
         frame.data[5] = static_cast<uint8_t>((timeoutMs >> 8) & 0xFF);
         frame.data[6] = static_cast<uint8_t>((timeoutMs >> 16) & 0xFF);
         frame.data[7] = static_cast<uint8_t>((timeoutMs >> 24) & 0xFF);
-        canController->send(frame);
+        if (!submitTx(frame, CanTxDispatcher::Category::Config, "MtCan::setCommunicationTimeout")) {
+            return false;
+        }
     }
 
     std::cout << "[MtCan] Communication timeout set to " << timeoutMs
@@ -238,8 +250,7 @@ bool MtCan::writeAcceleration(uint8_t motorId, uint8_t index, uint32_t value)
     frame.data[5] = static_cast<uint8_t>((value >> 8) & 0xFF);
     frame.data[6] = static_cast<uint8_t>((value >> 16) & 0xFF);
     frame.data[7] = static_cast<uint8_t>((value >> 24) & 0xFF);
-    canController->send(frame);
-    return true;
+    return submitTx(frame, CanTxDispatcher::Category::Config, "MtCan::writeAcceleration");
 }
 
 bool MtCan::setSpeedAcceleration(MotorID id, uint32_t accelDpsPerSec)
@@ -311,8 +322,7 @@ bool MtCan::setPosition(MotorID Id, int32_t position)
     frame.data[6] = static_cast<uint8_t>((position >> 16) & 0xFF);
     frame.data[7] = static_cast<uint8_t>((position >> 24) & 0xFF);
 
-    canController->send(frame);
-    return true;
+    return submitTx(frame, CanTxDispatcher::Category::Control, "MtCan::setPosition");
 }
 
 bool MtCan::quickSetPosition(MotorID Id, int32_t position)
@@ -461,7 +471,14 @@ void MtCan::sendFrame(uint16_t canId, uint8_t command, const std::array<uint8_t,
     frame.data[5] = payload[1];
     frame.data[6] = payload[2];
     frame.data[7] = payload[3];
-    canController->send(frame);
+
+    auto category = CanTxDispatcher::Category::Control;
+    if (command == 0x76) {
+        category = CanTxDispatcher::Category::Recover;
+    } else if (command == 0x64 || command == 0xB3 || command == 0x43) {
+        category = CanTxDispatcher::Category::Config;
+    }
+    (void)submitTx(frame, category, "MtCan::sendFrame");
 }
 
 // [FIX #2] DLC 改为 8，数据全部清零
@@ -482,7 +499,7 @@ void MtCan::requestState(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x9C;
-    canController->send(frame);
+    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestState");
 }
 
 // [FIX #2] DLC 改为 8，数据全部清零
@@ -503,7 +520,7 @@ void MtCan::requestError(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x9A;
-    canController->send(frame);
+    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestError");
 }
 
 // [FIX #5 NEW] 请求多圈角度 (0x92) 以获取实际位置
@@ -524,7 +541,26 @@ void MtCan::requestMultiTurnAngle(uint8_t motorId)
     frame.isRemoteRequest = false;
     frame.data.fill(0);
     frame.data[0] = 0x92;
-    canController->send(frame);
+    (void)submitTx(frame, CanTxDispatcher::Category::Query, "MtCan::requestMultiTurnAngle");
+}
+
+bool MtCan::submitTx(const CanTransport::Frame &frame,
+                     CanTxDispatcher::Category category,
+                     const char *source) const
+{
+    if (!txDispatcher_) {
+        ROS_ERROR_STREAM_THROTTLE(1.0,
+                                  "[MtCan] TX dispatcher unavailable for "
+                                  << (source ? source : "unknown"));
+        return false;
+    }
+
+    CanTxDispatcher::Request request;
+    request.frame = frame;
+    request.category = category;
+    request.source = source;
+    txDispatcher_->submit(request);
+    return true;
 }
 
 void MtCan::resetSystem(uint8_t motorId) const

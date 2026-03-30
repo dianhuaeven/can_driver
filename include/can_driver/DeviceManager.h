@@ -2,6 +2,7 @@
 #define CAN_DRIVER_DEVICE_MANAGER_H
 
 #include "can_driver/CanProtocol.h"
+#include "can_driver/CanTxDispatcher.h"
 #include "can_driver/CanType.h"
 #include "can_driver/EyouCan.h"
 #include "can_driver/IDeviceManager.h"
@@ -59,6 +60,7 @@ private:
     mutable std::shared_mutex mutex_;
     // key = can device name（例如 can0/vcan0）。
     std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
+    std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
     bool ppFastWriteEnabled_{false};

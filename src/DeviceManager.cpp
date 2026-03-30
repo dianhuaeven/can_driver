@@ -19,6 +19,7 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
     }
 
     transports_[device] = transport;
+    txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
     // 同步创建该设备的命令互斥锁，供上层 write() 串行下发命令使用。
     deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     ROS_INFO("[CanDriverHW] Opened CAN device '%s'.", device.c_str());
@@ -34,15 +35,21 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
         return false;
     }
     auto transport = transportIt->second;
+    auto txDispatcherIt = txDispatchers_.find(device);
+    if (txDispatcherIt == txDispatchers_.end()) {
+        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
+        txDispatcherIt = txDispatchers_.find(device);
+    }
+    auto txDispatcher = txDispatcherIt->second;
 
     // 按协议类型按需懒加载实例。
     if (type == CanType::MT) {
         if (mtProtocols_.find(device) == mtProtocols_.end()) {
-            mtProtocols_[device] = std::make_shared<MtCan>(transport);
+            mtProtocols_[device] = std::make_shared<MtCan>(transport, txDispatcher);
         }
     } else {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
-            auto eyou = std::make_shared<EyouCan>(transport);
+            auto eyou = std::make_shared<EyouCan>(transport, txDispatcher);
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
             eyouProtocols_[device] = std::move(eyou);
         }
@@ -64,6 +71,7 @@ bool DeviceManager::initDevice(const std::string &device,
             return false;
         }
         transports_[device] = transport;
+        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transport);
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
         transportIt = transports_.find(device);
     } else {
@@ -78,6 +86,9 @@ bool DeviceManager::initDevice(const std::string &device,
     if (deviceCmdMutexes_.find(device) == deviceCmdMutexes_.end()) {
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     }
+    if (txDispatchers_.find(device) == txDispatchers_.end()) {
+        txDispatchers_[device] = std::make_shared<DirectCanTxDispatcher>(transportIt->second);
+    }
 
     // 按协议拆分电机列表，避免不必要地创建协议实例。
     std::vector<MotorID> mtIds;
@@ -91,10 +102,10 @@ bool DeviceManager::initDevice(const std::string &device,
     }
     // 初始化协议对象并启动状态刷新任务。
     if (!mtIds.empty() && mtProtocols_.find(device) == mtProtocols_.end()) {
-        mtProtocols_[device] = std::make_shared<MtCan>(transportIt->second);
+        mtProtocols_[device] = std::make_shared<MtCan>(transportIt->second, txDispatchers_[device]);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
-        auto eyou = std::make_shared<EyouCan>(transportIt->second);
+        auto eyou = std::make_shared<EyouCan>(transportIt->second, txDispatchers_[device]);
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyouProtocols_[device] = std::move(eyou);
     }
@@ -167,6 +178,7 @@ void DeviceManager::shutdownAll()
         kv.second->shutdown();
     }
     transports_.clear();
+    txDispatchers_.clear();
     deviceCmdMutexes_.clear();
 }
 

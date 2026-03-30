@@ -46,6 +46,25 @@ public:
     ReceiveHandler receiveHandler;
 };
 
+class MockTxDispatcher : public CanTxDispatcher {
+public:
+    explicit MockTxDispatcher(std::shared_ptr<MockTransport> transport)
+        : transport(std::move(transport))
+    {
+    }
+
+    void submit(const Request &request) override
+    {
+        requests.push_back(request);
+        if (transport) {
+            transport->send(request.frame);
+        }
+    }
+
+    std::shared_ptr<MockTransport> transport;
+    std::vector<Request> requests;
+};
+
 class EyouCanTest : public ::testing::Test {
 protected:
     static void SetUpTestSuite()
@@ -55,11 +74,13 @@ protected:
 
     EyouCanTest()
         : transport(std::make_shared<MockTransport>())
-        , eyou(transport)
+        , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
+        , eyou(transport, txDispatcher)
     {
     }
 
     std::shared_ptr<MockTransport> transport;
+    std::shared_ptr<MockTxDispatcher> txDispatcher;
     EyouCan eyou;
 };
 
@@ -173,6 +194,26 @@ TEST_F(EyouCanTest, FastWriteModeUsesCmd05ForVelocityAndPosition)
     EXPECT_EQ(transport->sentFrames[2].data[1], 0x09);
     EXPECT_EQ(transport->sentFrames[3].data[0], 0x01);
     EXPECT_EQ(transport->sentFrames[3].data[1], 0x0A);
+}
+
+TEST_F(EyouCanTest, WritesRouteThroughUnifiedTxDispatcher)
+{
+    ASSERT_TRUE(eyou.setPosition(static_cast<MotorID>(0x05), 123));
+    ASSERT_EQ(txDispatcher->requests.size(), 2u);
+    EXPECT_EQ(txDispatcher->requests[0].category, CanTxDispatcher::Category::Control);
+    EXPECT_STREQ(txDispatcher->requests[0].source, "EyouCan::sendWriteCommand");
+    EXPECT_EQ(txDispatcher->requests[1].category, CanTxDispatcher::Category::Control);
+}
+
+TEST_F(EyouCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)
+{
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+
+    EyouCanTestAccessor::refresh(eyou);
+
+    ASSERT_FALSE(txDispatcher->requests.empty());
+    EXPECT_EQ(txDispatcher->requests.front().category, CanTxDispatcher::Category::Query);
+    EXPECT_STREQ(txDispatcher->requests.front().source, "EyouCan::sendReadCommand");
 }
 
 TEST_F(EyouCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
