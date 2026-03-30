@@ -115,23 +115,21 @@ public:
     }
 
     /**
-     * @brief 读取或返回缓存的实际位置
+     * @brief 返回缓存的实际位置
      * @param motorId 目标电机 ID
      * @return 位置值（协议单位）
-     *
-     * 没有实时数据时可主动触发一次读取，并在读取完成后更新缓存。
      */
     [[nodiscard]] virtual int64_t getPosition(MotorID motorId) const = 0;
 
     /**
-     * @brief 读取或返回缓存的实际电流
+     * @brief 返回缓存的实际电流
      * @param motorId 目标电机 ID
      * @return 电流数值（协议单位）
      */
     [[nodiscard]] virtual int16_t getCurrent(MotorID motorId) const = 0;
 
     /**
-     * @brief 读取或返回缓存的实际速度
+     * @brief 返回缓存的实际速度
      * @param motorId 目标电机 ID
      * @return 速度数值（协议单位）
      */

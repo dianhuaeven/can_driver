@@ -13,6 +13,7 @@
 #include <cstdint>
 
 class EyouCan : public CanProtocol {
+    friend class EyouCanTestAccessor;
 
 public:
 
@@ -75,17 +76,17 @@ public:
     bool ResetFault(MotorID motorId) override;
 
     /**
-     * @brief 读取/缓存电机位置（如无缓存则触发 0x07 读取）
+     * @brief 返回缓存的电机位置
      */
     int64_t getPosition(MotorID motorId) const override;
 
     /**
-     * @brief 返回缓存的实际电流（无缓存时触发 0x05 读取）
+     * @brief 返回缓存的实际电流
      */
     int16_t getCurrent(MotorID motorId) const override;
 
     /**
-     * @brief 返回缓存的实际速度（无缓存时触发 0x06 读取）
+     * @brief 返回缓存的实际速度
      */
     int16_t getVelocity(MotorID motorId) const override;
     bool isEnabled(MotorID motorId) const override;
@@ -122,6 +123,10 @@ private:
         bool currentReceived = false;
         MotorMode mode = MotorMode::Position;
     };
+    struct PendingReadRequest {
+        std::chrono::steady_clock::time_point lastSent {};
+        bool inFlight {false};
+    };
 
     std::shared_ptr<CanTransport> canController;
     mutable std::unordered_map<uint8_t, MotorState> motorStates;
@@ -136,6 +141,8 @@ private:
     std::atomic<bool> fastWriteEnabled_{false};
     std::atomic<uint64_t> fastWriteSentCount_{0};
     std::atomic<uint64_t> normalWriteSentCount_{0};
+    mutable std::mutex pendingReadMutex_;
+    std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
 
     /**
      * @brief 发送写指令帧（0x01）
@@ -148,23 +155,28 @@ private:
     /**
      * @brief 发送读指令帧（0x03）
      */
-    void sendReadCommand(uint8_t motorId, uint8_t subCommand) const;
+    void sendReadCommand(uint8_t motorId, uint8_t subCommand);
     /**
      * @brief 处理来自底层传输的回复帧（0x02/0x04）
      */
     void handleResponse(const CanTransport::Frame &data);
-    void requestPosition(uint8_t motorId) const;
-    void requestMode(uint8_t motorId) const;
-    void requestEnable(uint8_t motorId) const;
-    void requestFault(uint8_t motorId) const;
-    void requestCurrent(uint8_t motorId) const;
-    void requestVelocity(uint8_t motorId) const;
+    void requestPosition(uint8_t motorId);
+    void requestMode(uint8_t motorId);
+    void requestEnable(uint8_t motorId);
+    void requestFault(uint8_t motorId);
+    void requestCurrent(uint8_t motorId);
+    void requestVelocity(uint8_t motorId);
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
     void refreshMotorStates();
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
+    std::chrono::milliseconds computeReadRequestTimeout() const;
     void stopRefreshLoop();
     void publishWriteCountersParam() const;
+    bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
+    void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
+    void resetReadTracking();
+    static uint16_t pendingReadKey(uint8_t motorId, uint8_t subCommand);
 
     /// refresh 轮询周期计数，用于 slow 项分频
     uint64_t refreshCycleCount_{0};

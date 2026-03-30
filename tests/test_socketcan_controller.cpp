@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <cerrno>
 #include <can_driver/SocketCanController.h>
 #include <linux/can.h>
 
@@ -8,6 +9,10 @@ public:
   static can_frame toSock(SocketCanController& c, const CanTransport::Frame& f){ return c.toLinuxCanFrame(f); }
   static CanTransport::Frame fromSock(SocketCanController& c, const can_frame& f){ return c.fromLinuxCanFrame(f); }
   static void dispatch(SocketCanController& c, const CanTransport::Frame& f){ c.dispatchReceive(f); }
+  static bool localLoopback(){ return SocketCanController::shouldEnableLocalLoopback(); }
+  static bool recvOwn(bool loopback){ return SocketCanController::shouldReceiveOwnMessages(loopback); }
+  static bool isBackpressure(int errorCode){ return SocketCanController::isBackpressureSendError(errorCode); }
+  static bool isLinkUnavailable(int errorCode){ return SocketCanController::isLinkUnavailableSendError(errorCode); }
 };
 
 TEST(SocketCanController, EncodeDecodeRoundtripAndBounds){
@@ -57,4 +62,22 @@ TEST(SocketCanController, ShutdownResetsState){
   ctrl.shutdown();
   auto id2 = ctrl.addReceiveHandler([](auto const&){});
   EXPECT_EQ(id2,1u);
+}
+
+TEST(SocketCanController, LoopbackPolicyPreservesLocalSniffing){
+  EXPECT_TRUE(SocketCanControllerTestAccessor::localLoopback());
+  EXPECT_FALSE(SocketCanControllerTestAccessor::recvOwn(false));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::recvOwn(true));
+}
+
+TEST(SocketCanController, SendErrorClassificationMatchesNonBlockingPolicy){
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(EAGAIN));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(EWOULDBLOCK));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isBackpressure(ENOBUFS));
+  EXPECT_FALSE(SocketCanControllerTestAccessor::isBackpressure(EINVAL));
+
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENETDOWN));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENODEV));
+  EXPECT_TRUE(SocketCanControllerTestAccessor::isLinkUnavailable(ENXIO));
+  EXPECT_FALSE(SocketCanControllerTestAccessor::isLinkUnavailable(EBUSY));
 }

@@ -25,7 +25,9 @@ public:
     /**
      * @brief Initialize the CAN interface.
      * @param device SocketCAN device name (e.g. "can0").
-     * @param loopback Enable CAN loopback frames.
+     * @param loopback Whether this socket should receive its own transmitted
+     * frames. Kernel local loopback remains enabled so local sniffers such as
+     * candump can still observe outgoing traffic.
      */
     bool initialize(const std::string &device, bool loopback = false);
 
@@ -44,6 +46,10 @@ private:
     void dispatchReceive(const CanTransport::Frame &frame);
     struct can_frame toLinuxCanFrame(const CanTransport::Frame &frame) const;
     CanTransport::Frame fromLinuxCanFrame(const struct can_frame &frame) const;
+    static bool shouldEnableLocalLoopback();
+    static bool shouldReceiveOwnMessages(bool loopback);
+    static bool isBackpressureSendError(int errorCode);
+    static bool isLinkUnavailableSendError(int errorCode);
 
     std::atomic<bool> initialized_{false};
     std::atomic<bool> stopRequested_{false};

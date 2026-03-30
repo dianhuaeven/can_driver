@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -63,29 +64,63 @@ protected:
 
 } // namespace
 
+class EyouCanTestAccessor {
+public:
+    static void setRefreshState(EyouCan &eyou, const std::vector<uint8_t> &motorIds, bool active)
+    {
+        std::lock_guard<std::mutex> lock(eyou.refreshMutex);
+        eyou.refreshMotorIds = motorIds;
+        eyou.managedMotorIds.clear();
+        for (const auto motorId : motorIds) {
+            eyou.managedMotorIds.insert(motorId);
+        }
+        eyou.refreshLoopActive.store(active);
+        eyou.refreshCycleCount_ = 0;
+        std::lock_guard<std::mutex> pendingLock(eyou.pendingReadMutex_);
+        eyou.pendingReadRequests_.clear();
+    }
+
+    static void refresh(EyouCan &eyou)
+    {
+        eyou.refreshMotorStates();
+    }
+};
+
 TEST_F(EyouCanTest, SetPositionEncodesExpectedWriteFrame)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
     constexpr int32_t kPosition = 0x01020304;
 
     ASSERT_TRUE(eyou.setPosition(kMotorId, kPosition));
-    ASSERT_EQ(transport->sentFrames.size(), 1u);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
 
-    const auto &frame = transport->sentFrames[0];
-    // Eyou/PP 写命令：0x01 + 子命令 + 大端负载。
-    EXPECT_EQ(frame.id, 0x0005u);
-    EXPECT_FALSE(frame.isExtended);
-    EXPECT_FALSE(frame.isRemoteRequest);
-    // 新协议实现统一输出 8 字节帧，尾部用 0 填充。
-    EXPECT_EQ(frame.dlc, 8u);
-    EXPECT_EQ(frame.data[0], 0x01); // write
-    EXPECT_EQ(frame.data[1], 0x0A); // position sub-command
-    EXPECT_EQ(frame.data[2], 0x01);
-    EXPECT_EQ(frame.data[3], 0x02);
-    EXPECT_EQ(frame.data[4], 0x03);
-    EXPECT_EQ(frame.data[5], 0x04);
-    EXPECT_EQ(frame.data[6], 0x00);
-    EXPECT_EQ(frame.data[7], 0x00);
+    const auto &velocityFrame = transport->sentFrames[0];
+    const auto &positionFrame = transport->sentFrames[1];
+
+    // Eyou/PP 位置命令会先补一帧目标速度，再发目标位置。
+    EXPECT_EQ(velocityFrame.id, 0x0005u);
+    EXPECT_FALSE(velocityFrame.isExtended);
+    EXPECT_FALSE(velocityFrame.isRemoteRequest);
+    EXPECT_EQ(velocityFrame.dlc, 8u);
+    EXPECT_EQ(velocityFrame.data[0], 0x01);
+    EXPECT_EQ(velocityFrame.data[1], 0x09);
+    EXPECT_EQ(velocityFrame.data[2], 0x00);
+    EXPECT_EQ(velocityFrame.data[3], 0x00);
+    EXPECT_EQ(velocityFrame.data[4], 0x2A);
+    EXPECT_EQ(velocityFrame.data[5], 0xAA);
+
+    EXPECT_EQ(positionFrame.id, 0x0005u);
+    EXPECT_FALSE(positionFrame.isExtended);
+    EXPECT_FALSE(positionFrame.isRemoteRequest);
+    EXPECT_EQ(positionFrame.dlc, 8u);
+    EXPECT_EQ(positionFrame.data[0], 0x01); // write
+    EXPECT_EQ(positionFrame.data[1], 0x0A); // position sub-command
+    EXPECT_EQ(positionFrame.data[2], 0x01);
+    EXPECT_EQ(positionFrame.data[3], 0x02);
+    EXPECT_EQ(positionFrame.data[4], 0x03);
+    EXPECT_EQ(positionFrame.data[5], 0x04);
+    EXPECT_EQ(positionFrame.data[6], 0x00);
+    EXPECT_EQ(positionFrame.data[7], 0x00);
 }
 
 TEST_F(EyouCanTest, FastWriteModeUsesCmd05ForVelocityAndPosition)
@@ -95,35 +130,44 @@ TEST_F(EyouCanTest, FastWriteModeUsesCmd05ForVelocityAndPosition)
     eyou.setFastWriteEnabled(true);
 
     ASSERT_TRUE(eyou.setVelocity(kMotorId, 123));
-    ASSERT_EQ(transport->sentFrames.size(), 1u);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x05);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x09);
 
     transport->clearSent();
     ASSERT_TRUE(eyou.setPosition(kMotorId, 456));
-    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    ASSERT_EQ(transport->sentFrames.size(), 4u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x05);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
     EXPECT_EQ(transport->sentFrames[1].data[0], 0x05);
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
+    EXPECT_EQ(transport->sentFrames[2].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[3].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[3].data[1], 0x0A);
 }
 
-TEST_F(EyouCanTest, GetPositionWithoutCacheSendsReadRequest)
+TEST_F(EyouCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
 
     const int64_t pos = eyou.getPosition(kMotorId);
 
     EXPECT_EQ(pos, 0);
-    ASSERT_EQ(transport->sentFrames.size(), 1u);
-    const auto &frame = transport->sentFrames[0];
-    // 首次读取位置应主动发起寄存器读取（0x03/0x07）。
-    EXPECT_EQ(frame.id, 0x0005u);
-    EXPECT_EQ(frame.dlc, 8u);
-    EXPECT_EQ(frame.data[0], 0x03); // read
-    EXPECT_EQ(frame.data[1], 0x07); // position register
-    EXPECT_EQ(frame.data[2], 0x00);
-    EXPECT_EQ(frame.data[7], 0x00);
+    EXPECT_TRUE(transport->sentFrames.empty());
+}
+
+TEST_F(EyouCanTest, RefreshDoesNotResendSameReadWhileRequestIsInFlight)
+{
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 6u);
+
+    EyouCanTestAccessor::refresh(eyou);
+    EXPECT_EQ(transport->sentFrames.size(), 6u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

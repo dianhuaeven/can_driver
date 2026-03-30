@@ -12,6 +12,7 @@
 #include <vector>
 
 class MtCan : public CanProtocol {
+    friend class MtCanTestAccessor;
 
 public:
     /**
@@ -134,6 +135,10 @@ private:
         bool error = false;
         MotorMode mode = MotorMode::Velocity;
     };
+    struct PendingReadRequest {
+        std::chrono::steady_clock::time_point lastSent {};
+        bool inFlight {false};
+    };
 
     std::shared_ptr<CanTransport> canController;
     mutable std::unordered_map<uint8_t, MotorState> motorStates;
@@ -144,6 +149,8 @@ private:
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
     std::atomic<double> refreshRateHz_{0.0};
+    mutable std::mutex pendingReadMutex_;
+    std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -156,15 +163,15 @@ private:
     /**
      * @brief 触发读状态命令（0x9C）
      */
-    void requestState(uint8_t motorId) const;
+    void requestState(uint8_t motorId);
     /**
      * @brief 触发读错误命令（0x9A）
      */
-    void requestError(uint8_t motorId) const;
+    void requestError(uint8_t motorId);
     /**
      * @brief 触发读多圈角度命令（0x92）
      */
-    void requestMultiTurnAngle(uint8_t motorId) const;
+    void requestMultiTurnAngle(uint8_t motorId);
     /**
      * @brief 复位系统（0x76）
      */
@@ -184,10 +191,15 @@ private:
      */
     void broadcastCommunicationTimeout(uint32_t timeoutMs);
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
+    std::chrono::milliseconds computeReadRequestTimeout() const;
     /**
      * @brief 解析 CAN 返回帧，更新缓存
      */
     void handleResponse(const CanTransport::Frame &data);
+    bool tryIssueReadCommand(uint8_t motorId, uint8_t command);
+    void markReadResponseReceived(uint8_t motorId, uint8_t command);
+    void resetReadTracking();
+    static uint16_t pendingReadKey(uint8_t motorId, uint8_t command);
 };
 
 #endif // MTCAN_H

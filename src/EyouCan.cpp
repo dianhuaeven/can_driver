@@ -107,6 +107,8 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
             managedMotorIds.insert(motorId);
         }
     }
+    resetReadTracking();
+    refreshCycleCount_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -307,7 +309,8 @@ bool EyouCan::ResetFault(MotorID Id)
     const uint8_t motorId = static_cast<uint8_t>(Id);
     registerManagedMotorId(motorId);
     sendWriteCommand(motorId, 0x15, 0x00000000, 4);
-    sendReadCommand(motorId, 0x15);
+    markReadResponseReceived(motorId, 0x15);
+    requestFault(motorId);
     return true;
 }
 
@@ -323,8 +326,6 @@ int64_t EyouCan::getPosition(MotorID Id) const
             return it->second.position;
         }
     }
-    // 尚未收到过位置数据，主动请求一次
-    requestPosition(motorId);
     return 0;
 }
 
@@ -340,7 +341,6 @@ int16_t EyouCan::getCurrent(MotorID Id) const
             return clampInt32ToInt16WithWarn(it->second.current, motorId, "current");
         }
     }
-    requestCurrent(motorId);
     return 0;
 }
 
@@ -356,7 +356,6 @@ int16_t EyouCan::getVelocity(MotorID Id) const
             return clampInt32ToInt16WithWarn(it->second.actualVelocity, motorId, "velocity");
         }
     }
-    requestVelocity(motorId);
     return 0;
 }
 
@@ -464,13 +463,20 @@ void EyouCan::sendWriteCommand(uint8_t motorId,
 
 void EyouCan::publishWriteCountersParam() const
 {
+    if (!ros::isInitialized()) {
+        return;
+    }
+    if (!ros::master::check()) {
+        ROS_WARN_STREAM_THROTTLE(5.0, "[EyouCan] ROS master unavailable, skip publishing PP write counters.");
+        return;
+    }
     static ros::NodeHandle pnh("~");
     pnh.setParam("pp_fast_write_enabled_runtime", fastWriteEnabled_.load(std::memory_order_relaxed));
     pnh.setParam("pp_fast_write_sent_count", static_cast<double>(fastWriteSentCount_.load(std::memory_order_relaxed)));
     pnh.setParam("pp_normal_write_sent_count", static_cast<double>(normalWriteSentCount_.load(std::memory_order_relaxed)));
 }
 
-void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand) const
+void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand)
 {
     if (!canController) {
         return;
@@ -486,6 +492,70 @@ void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand) const
     frame.data[0] = kReadCommand;
     frame.data[1] = subCommand;
     canController->send(frame);
+}
+
+bool EyouCan::tryIssueReadCommand(uint8_t motorId, uint8_t subCommand)
+{
+    if (!canController) {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto timeout = computeReadRequestTimeout();
+    bool timedOut = false;
+    {
+        std::lock_guard<std::mutex> lock(pendingReadMutex_);
+        auto &request = pendingReadRequests_[pendingReadKey(motorId, subCommand)];
+        if (request.inFlight && (now - request.lastSent) < timeout) {
+            return false;
+        }
+        timedOut = request.inFlight;
+        request.inFlight = true;
+        request.lastSent = now;
+    }
+
+    if (timedOut) {
+        ROS_WARN_STREAM_THROTTLE(
+            1.0,
+            "[EyouCan] Read timeout on motor " << static_cast<unsigned>(motorId)
+            << " subcmd=0x" << std::hex << static_cast<unsigned>(subCommand) << std::dec
+            << ", retrying");
+    }
+
+    sendReadCommand(motorId, subCommand);
+    return true;
+}
+
+void EyouCan::markReadResponseReceived(uint8_t motorId, uint8_t subCommand)
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    auto it = pendingReadRequests_.find(pendingReadKey(motorId, subCommand));
+    if (it != pendingReadRequests_.end()) {
+        it->second.inFlight = false;
+    }
+}
+
+void EyouCan::resetReadTracking()
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    pendingReadRequests_.clear();
+}
+
+uint16_t EyouCan::pendingReadKey(uint8_t motorId, uint8_t subCommand)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(motorId) << 8) | subCommand);
+}
+
+std::chrono::milliseconds EyouCan::computeReadRequestTimeout() const
+{
+    std::size_t motorCount = 1;
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        motorCount = std::max<std::size_t>(1, refreshMotorIds.size());
+    }
+    const auto refreshSleep = computeRefreshSleep(motorCount);
+    const auto timeout = refreshSleep * 3;
+    return std::max(std::chrono::milliseconds(20), std::min(timeout, std::chrono::milliseconds(200)));
 }
 
 // [FIX #2, #3, #4] 重写 handleResponse，修正写返回解析和读返回偏移
@@ -549,6 +619,7 @@ void EyouCan::handleResponse(const CanTransport::Frame &frame)
                 }
             }
         } else if (responseType == kReadResponse) {
+            markReadResponseReceived(motorId, subCommand);
             // 读返回格式: 0x04 ADDR data0 data1 data2 data3
             // 32位数据从 data[2] 开始（即 DAT2~DAT5）
             switch (subCommand) {
@@ -629,36 +700,36 @@ void EyouCan::registerManagedMotorId(uint8_t motorId) const
     managedMotorIds.insert(motorId);
 }
 
-void EyouCan::requestPosition(uint8_t motorId) const
+void EyouCan::requestPosition(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x07);
+    (void)tryIssueReadCommand(motorId, 0x07);
 }
 
-void EyouCan::requestMode(uint8_t motorId) const
+void EyouCan::requestMode(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x0F);
+    (void)tryIssueReadCommand(motorId, 0x0F);
 }
 
-void EyouCan::requestEnable(uint8_t motorId) const
+void EyouCan::requestEnable(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x10);
+    (void)tryIssueReadCommand(motorId, 0x10);
 }
 
-void EyouCan::requestFault(uint8_t motorId) const
+void EyouCan::requestFault(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x15);
+    (void)tryIssueReadCommand(motorId, 0x15);
 }
 
 // [FIX #7] 新增：请求电流值
-void EyouCan::requestCurrent(uint8_t motorId) const
+void EyouCan::requestCurrent(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x05);
+    (void)tryIssueReadCommand(motorId, 0x05);
 }
 
 // [FIX #8] 新增：请求速度值
-void EyouCan::requestVelocity(uint8_t motorId) const
+void EyouCan::requestVelocity(uint8_t motorId)
 {
-    sendReadCommand(motorId, 0x06);
+    (void)tryIssueReadCommand(motorId, 0x06);
 }
 
 void EyouCan::refreshMotorStates()
@@ -701,4 +772,5 @@ void EyouCan::stopRefreshLoop()
     if (refreshThread.joinable()) {
         refreshThread.join();
     }
+    resetReadTracking();
 }

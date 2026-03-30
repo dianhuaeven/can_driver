@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <vector>
 
 namespace {
@@ -63,6 +64,23 @@ protected:
 };
 
 } // namespace
+
+class MtCanTestAccessor {
+public:
+    static void setRefreshState(MtCan &mt, const std::vector<uint8_t> &motorIds, bool active)
+    {
+        std::lock_guard<std::mutex> lock(mt.refreshMutex);
+        mt.refreshMotorIds = motorIds;
+        mt.refreshLoopActive.store(active);
+        std::lock_guard<std::mutex> pendingLock(mt.pendingReadMutex_);
+        mt.pendingReadRequests_.clear();
+    }
+
+    static void refresh(MtCan &mt)
+    {
+        mt.refreshMotorStates();
+    }
+};
 
 TEST_F(MtCanTest, SetVelocityEncodesExpectedFrame)
 {
@@ -190,6 +208,23 @@ TEST_F(MtCanTest, GetPositionPreservesLargeMultiTurnAngle)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(mt.getPosition(kResponseNodeId), 2147483648LL);
+}
+
+TEST_F(MtCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
+{
+    EXPECT_EQ(mt.getPosition(static_cast<MotorID>(0x01)), 0);
+    EXPECT_TRUE(transport->sentFrames.empty());
+}
+
+TEST_F(MtCanTest, RefreshDoesNotResendSameReadWhileRequestIsInFlight)
+{
+    MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
+
+    MtCanTestAccessor::refresh(mt);
+    ASSERT_EQ(transport->sentFrames.size(), 3u);
+
+    MtCanTestAccessor::refresh(mt);
+    EXPECT_EQ(transport->sentFrames.size(), 3u);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)

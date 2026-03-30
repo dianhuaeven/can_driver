@@ -9,6 +9,8 @@
 #include <iomanip>
 #include <iostream>
 
+#include <ros/ros.h>
+
 namespace {
 constexpr uint16_t kSendBaseId = 0x140;
 constexpr uint16_t kResponseBaseId = 0x240;
@@ -90,6 +92,7 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
             refreshMotorIds.push_back(static_cast<uint8_t>(id));
         }
     }
+    resetReadTracking();
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -371,6 +374,7 @@ bool MtCan::ResetFault(MotorID Id)
     }
     const uint8_t motorId = static_cast<uint8_t>(Id);
     resetSystem(motorId);
+    markReadResponseReceived(motorId, 0x9A);
     requestError(motorId);
     return true;
 }
@@ -386,7 +390,6 @@ int64_t MtCan::getPosition(MotorID Id) const
             return it->second.multiTurnAngle;
         }
     }
-    requestMultiTurnAngle(motorId);
     return 0;
 }
 
@@ -400,7 +403,6 @@ int16_t MtCan::getCurrent(MotorID Id) const
             return static_cast<int16_t>(std::lround(it->second.current * 100));
         }
     }
-    requestState(motorId);
     return 0;
 }
 
@@ -415,7 +417,6 @@ int16_t MtCan::getVelocity(MotorID Id) const
             return it->second.velocity;
         }
     }
-    requestState(motorId);
     return 0;
 }
 
@@ -464,9 +465,12 @@ void MtCan::sendFrame(uint16_t canId, uint8_t command, const std::array<uint8_t,
 }
 
 // [FIX #2] DLC 改为 8，数据全部清零
-void MtCan::requestState(uint8_t motorId) const
+void MtCan::requestState(uint8_t motorId)
 {
     if (!canController) {
+        return;
+    }
+    if (!tryIssueReadCommand(motorId, 0x9C)) {
         return;
     }
     const uint16_t canId = encodeSendCanId(motorId);
@@ -482,9 +486,12 @@ void MtCan::requestState(uint8_t motorId) const
 }
 
 // [FIX #2] DLC 改为 8，数据全部清零
-void MtCan::requestError(uint8_t motorId) const
+void MtCan::requestError(uint8_t motorId)
 {
     if (!canController) {
+        return;
+    }
+    if (!tryIssueReadCommand(motorId, 0x9A)) {
         return;
     }
     const uint16_t canId = encodeSendCanId(motorId);
@@ -500,9 +507,12 @@ void MtCan::requestError(uint8_t motorId) const
 }
 
 // [FIX #5 NEW] 请求多圈角度 (0x92) 以获取实际位置
-void MtCan::requestMultiTurnAngle(uint8_t motorId) const
+void MtCan::requestMultiTurnAngle(uint8_t motorId)
 {
     if (!canController) {
+        return;
+    }
+    if (!tryIssueReadCommand(motorId, 0x92)) {
         return;
     }
     const uint16_t canId = encodeSendCanId(motorId);
@@ -559,6 +569,70 @@ void MtCan::stopRefreshLoop()
     if (refreshThread.joinable()) {
         refreshThread.join();
     }
+    resetReadTracking();
+}
+
+bool MtCan::tryIssueReadCommand(uint8_t motorId, uint8_t command)
+{
+    if (!canController) {
+        return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto timeout = computeReadRequestTimeout();
+    bool timedOut = false;
+    {
+        std::lock_guard<std::mutex> lock(pendingReadMutex_);
+        auto &request = pendingReadRequests_[pendingReadKey(motorId, command)];
+        if (request.inFlight && (now - request.lastSent) < timeout) {
+            return false;
+        }
+        timedOut = request.inFlight;
+        request.inFlight = true;
+        request.lastSent = now;
+    }
+
+    if (timedOut) {
+        ROS_WARN_STREAM_THROTTLE(
+            1.0,
+            "[MtCan] Read timeout on motor " << static_cast<unsigned>(motorId)
+            << " cmd=0x" << std::hex << static_cast<unsigned>(command) << std::dec
+            << ", retrying");
+    }
+
+    return true;
+}
+
+void MtCan::markReadResponseReceived(uint8_t motorId, uint8_t command)
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    auto it = pendingReadRequests_.find(pendingReadKey(motorId, command));
+    if (it != pendingReadRequests_.end()) {
+        it->second.inFlight = false;
+    }
+}
+
+void MtCan::resetReadTracking()
+{
+    std::lock_guard<std::mutex> lock(pendingReadMutex_);
+    pendingReadRequests_.clear();
+}
+
+uint16_t MtCan::pendingReadKey(uint8_t motorId, uint8_t command)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(motorId) << 8) | command);
+}
+
+std::chrono::milliseconds MtCan::computeReadRequestTimeout() const
+{
+    std::size_t motorCount = 1;
+    {
+        std::lock_guard<std::mutex> lock(refreshMutex);
+        motorCount = std::max<std::size_t>(1, refreshMotorIds.size());
+    }
+    const auto refreshSleep = computeRefreshSleep(motorCount);
+    const auto timeout = refreshSleep * 3;
+    return std::max(std::chrono::milliseconds(20), std::min(timeout, std::chrono::milliseconds(200)));
 }
 
 // [FIX #1] 重写 handleResponse，修正 nodeId 提取
@@ -583,6 +657,16 @@ void MtCan::handleResponse(const CanTransport::Frame &frame)
     //   原代码: canId & 0xFF → 0x241 & 0xFF = 0x41 = 65（错误）
     //   修正后: canId - 0x240 → 0x241 - 0x240 = 1（正确）
     const uint8_t nodeId = static_cast<uint8_t>(canId - kResponseBaseId);
+
+    switch (command) {
+    case 0x9C:
+    case 0x9A:
+    case 0x92:
+        markReadResponseReceived(nodeId, command);
+        break;
+    default:
+        break;
+    }
 
     bool shouldResetAfterZero = false;
 
