@@ -61,7 +61,7 @@ private:
     std::shared_ptr<IDeviceManager> deviceManager_;
     const MotorActionExecutor *motorActionExecutor_{nullptr};
     mutable std::mutex targetsMutex_;
-    mutable std::mutex axisRuntimeMutex_;
+    mutable std::mutex axisReadinessMutex_;
     mutable std::map<std::string, AxisReadinessEvaluator> axisReadinessEvaluators_;
     std::vector<MotorActionExecutor::Target> targets_;
 };

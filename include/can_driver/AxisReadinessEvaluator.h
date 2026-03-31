@@ -9,40 +9,8 @@
 
 namespace can_driver {
 
-enum class AxisReadinessPhase : std::uint8_t {
-    Offline = 0,
-    Degraded,
-    Disabled,
-    Enabled,
-    Commanding,
-    FaultActive,
-    Recovering,
-};
-
-inline const char *AxisReadinessPhaseName(AxisReadinessPhase phase)
-{
-    switch (phase) {
-    case AxisReadinessPhase::Offline:
-        return "Offline";
-    case AxisReadinessPhase::Degraded:
-        return "Degraded";
-    case AxisReadinessPhase::Disabled:
-        return "Disabled";
-    case AxisReadinessPhase::Enabled:
-        return "Enabled";
-    case AxisReadinessPhase::Commanding:
-        return "Commanding";
-    case AxisReadinessPhase::FaultActive:
-        return "FaultActive";
-    case AxisReadinessPhase::Recovering:
-        return "Recovering";
-    }
-    return "Unknown";
-}
-
 struct AxisReadiness {
     SharedDriverState::AxisKey key;
-    AxisReadinessPhase phase{AxisReadinessPhase::Offline};
     AxisIntent intent{AxisIntent::None};
     bool deviceReady{false};
     bool feedbackSeen{false};
@@ -97,15 +65,12 @@ public:
                 } else {
                     recoverHealthyCycles_ = std::max<std::uint32_t>(recoverHealthyCycles_, 1u);
                 }
-                if (recoverHealthyCycles_ < config_.recoverConfirmCycles) {
-                    readiness.phase = AxisReadinessPhase::Recovering;
-                } else {
+                if (recoverHealthyCycles_ >= config_.recoverConfirmCycles) {
                     readiness.recoverConfirmed = true;
                 }
             } else {
                 recoverHealthyCycles_ = 0;
                 lastRecoverSampleNs_ = 0;
-                readiness.phase = AxisReadinessPhase::Recovering;
                 readiness.recoverConfirmed = false;
             }
         } else {
@@ -150,7 +115,7 @@ public:
 
     static std::string DescribeBlockReason(const AxisReadiness &readiness)
     {
-        if (!readiness.deviceReady || readiness.phase == AxisReadinessPhase::Offline) {
+        if (!readiness.deviceReady || !readiness.feedbackSeen) {
             return "Feedback offline.";
         }
         if (!readiness.feedbackReady) {
@@ -165,7 +130,7 @@ public:
         if (!readiness.modeReady) {
             return "Mode not ready.";
         }
-        if (readiness.phase == AxisReadinessPhase::Recovering) {
+        if (RecoverPending(readiness)) {
             return "Axis still recovering.";
         }
         return std::string();
@@ -174,6 +139,12 @@ public:
     static std::string DescribeMotionBlock(const AxisReadiness &readiness)
     {
         return DescribeBlockReason(readiness);
+    }
+
+    static bool RecoverPending(const AxisReadiness &readiness)
+    {
+        return readiness.intent == AxisIntent::Recover && !readiness.recoverConfirmed &&
+               readiness.axisReadyForEnable;
     }
 
 private:
@@ -219,26 +190,6 @@ private:
         readiness.axisReadyForEnable = readiness.feedbackReady && readiness.faultCleared;
         readiness.axisReadyForRun =
             readiness.axisReadyForEnable && readiness.enabledReady && readiness.modeReady;
-
-        if (!readiness.deviceReady || !readiness.feedbackSeen) {
-            readiness.phase = AxisReadinessPhase::Offline;
-            return readiness;
-        }
-        if (!readiness.feedbackReady) {
-            readiness.phase = AxisReadinessPhase::Degraded;
-            return readiness;
-        }
-        if (!readiness.faultCleared) {
-            readiness.phase = AxisReadinessPhase::FaultActive;
-            return readiness;
-        }
-        if (!readiness.enabledReady) {
-            readiness.phase = AxisReadinessPhase::Disabled;
-            return readiness;
-        }
-
-        readiness.phase =
-            readiness.commandValid ? AxisReadinessPhase::Commanding : AxisReadinessPhase::Enabled;
         return readiness;
     }
 

@@ -223,7 +223,7 @@ std::vector<MotorActionExecutor::Target> makeTargets()
     };
 }
 
-TEST(AxisReadinessEvaluatorTest, PpAxisTransitionsFromEnabledToCommandingWhenFeedbackIsFresh)
+TEST(AxisReadinessEvaluatorTest, PpAxisReportsReadyFactsBeforeAndAfterFirstCommand)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
@@ -244,7 +244,10 @@ TEST(AxisReadinessEvaluatorTest, PpAxisTransitionsFromEnabledToCommandingWhenFee
 
     const auto enabled = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(enabled.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(enabled.feedbackReady);
+    EXPECT_TRUE(enabled.enabledReady);
+    EXPECT_FALSE(enabled.commandValid);
+    EXPECT_FALSE(enabled.modeExpected);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(enabled));
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabled));
 
@@ -256,12 +259,15 @@ TEST(AxisReadinessEvaluatorTest, PpAxisTransitionsFromEnabledToCommandingWhenFee
 
     const auto commanding = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(commanding.phase, can_driver::AxisReadinessPhase::Commanding);
+    EXPECT_TRUE(commanding.commandValid);
+    EXPECT_TRUE(commanding.modeExpected);
+    EXPECT_TRUE(commanding.modeMatched);
+    EXPECT_TRUE(commanding.modeReady);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(commanding));
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(commanding));
 }
 
-TEST(AxisReadinessEvaluatorTest, PpAxisUsesDegradedAndFaultActivePhasesForUnhealthyPaths)
+TEST(AxisReadinessEvaluatorTest, PpAxisReportsDegradedAndFaultFactsOnUnhealthyPaths)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
@@ -282,7 +288,8 @@ TEST(AxisReadinessEvaluatorTest, PpAxisUsesDegradedAndFaultActivePhasesForUnheal
 
     const auto degraded = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(degraded.phase, can_driver::AxisReadinessPhase::Degraded);
+    EXPECT_FALSE(degraded.feedbackReady);
+    EXPECT_TRUE(degraded.enabledReady);
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForEnable(degraded));
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForRun(degraded));
     EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(degraded),
@@ -292,7 +299,7 @@ TEST(AxisReadinessEvaluatorTest, PpAxisUsesDegradedAndFaultActivePhasesForUnheal
     feedback.fault = true;
     const auto faultActive = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(faultActive.phase, can_driver::AxisReadinessPhase::FaultActive);
+    EXPECT_TRUE(faultActive.feedbackReady);
     EXPECT_FALSE(faultActive.faultCleared);
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForEnable(faultActive));
     EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(faultActive),
@@ -320,13 +327,17 @@ TEST(AxisReadinessEvaluatorTest, RecoveringRequiresTwoFreshHealthyFeedbackSample
 
     const auto firstRecovering = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs);
-    EXPECT_EQ(firstRecovering.phase, can_driver::AxisReadinessPhase::Recovering);
+    EXPECT_TRUE(firstRecovering.axisReadyForEnable);
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(firstRecovering));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverPending(firstRecovering));
+    EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(firstRecovering),
+              "Axis still recovering.");
 
     const auto sameFrameRecovering = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs + 1000000LL);
-    EXPECT_EQ(sameFrameRecovering.phase, can_driver::AxisReadinessPhase::Recovering);
+    EXPECT_TRUE(sameFrameRecovering.axisReadyForEnable);
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(sameFrameRecovering));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverPending(sameFrameRecovering));
 
     feedback.lastRxSteadyNs = nowNs + 20000000LL;
     feedback.fault = false;
@@ -336,9 +347,10 @@ TEST(AxisReadinessEvaluatorTest, RecoveringRequiresTwoFreshHealthyFeedbackSample
         can_driver::AxisIntent::Recover,
         &deviceHealth,
         feedback.lastRxSteadyNs);
-    EXPECT_EQ(recovered.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(recovered.axisReadyForEnable);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(recovered));
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(recovered));
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverPending(recovered));
 }
 
 TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBeforeRelease)
@@ -366,7 +378,9 @@ TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBefo
 
     const auto enabledBlocked = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(enabledBlocked.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(enabledBlocked.feedbackReady);
+    EXPECT_TRUE(enabledBlocked.enabledReady);
+    EXPECT_FALSE(enabledBlocked.modeReady);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(enabledBlocked));
     EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabledBlocked));
     EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(enabledBlocked),
@@ -376,7 +390,7 @@ TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBefo
     feedback.lastModeMatchSteadyNs = nowNs;
     const auto enabledReady = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(enabledReady.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(enabledReady.modeReady);
     EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabledReady));
 }
 

@@ -38,7 +38,7 @@ void LifecycleDriverOps::configure(std::shared_ptr<IDeviceManager> deviceManager
         deviceManager_ = std::move(deviceManager);
         motorActionExecutor_ = motorActionExecutor;
     }
-    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
     axisReadinessEvaluators_.clear();
 }
 
@@ -48,7 +48,7 @@ void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> tar
         std::lock_guard<std::mutex> lock(targetsMutex_);
         targets_ = std::move(targets);
     }
-    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
     axisReadinessEvaluators_.clear();
 }
 
@@ -146,7 +146,7 @@ AxisReadiness LifecycleDriverOps::evaluateAxisReadiness(
     AxisIntent intent,
     const SharedDriverState::DeviceHealthState *deviceHealth) const
 {
-    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    std::lock_guard<std::mutex> readinessLock(axisReadinessMutex_);
     return axisReadinessEvaluators_[axisReadinessMapKey(axisKey)].Evaluate(
         feedback, command, intent, deviceHealth);
 }
