@@ -5,11 +5,13 @@
 
 #include "can_driver/CanDriverHW.h"
 #include "can_driver/IDeviceManager.h"
+#include "can_driver/MotorState.h"
 #include "can_driver/lifecycle_service_gateway.hpp"
 #include "can_driver/MotorCommand.h"
 #include "can_driver/Recover.h"
 
 #include <atomic>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -53,7 +55,11 @@ public:
 
     bool quickSetPosition(MotorID motorId, int32_t position) override
     {
-        return setPosition(motorId, position);
+        std::lock_guard<std::mutex> lock(mutex_);
+        lastQuickPositionMotor_ = motorId;
+        lastQuickPosition_ = position;
+        ++quickSetPositionCalls_;
+        return true;
     }
 
     bool Enable(MotorID motorId) override
@@ -79,10 +85,43 @@ public:
         return true;
     }
 
-    int64_t getPosition(MotorID) const override { return 0; }
-    int16_t getCurrent(MotorID) const override { return 0; }
-    int16_t getVelocity(MotorID) const override { return 0; }
+    int64_t getPosition(MotorID) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return feedbackPosition_;
+    }
+
+    int16_t getCurrent(MotorID) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return feedbackCurrent_;
+    }
+
+    int16_t getVelocity(MotorID) const override
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return feedbackVelocity_;
+    }
+
     void initializeMotorRefresh(const std::vector<MotorID> &) override {}
+
+    int setModeCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return setModeCalls_;
+    }
+
+    uint16_t lastModeMotor() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint16_t>(lastModeMotor_);
+    }
+
+    MotorMode lastMode() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastMode_;
+    }
 
     int velocityCalls() const
     {
@@ -106,6 +145,30 @@ public:
     {
         std::lock_guard<std::mutex> lock(mutex_);
         return enableCalls_;
+    }
+
+    int positionCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return setPositionCalls_;
+    }
+
+    int quickPositionCalls() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return quickSetPositionCalls_;
+    }
+
+    int32_t lastQuickPosition() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return lastQuickPosition_;
+    }
+
+    uint16_t lastQuickPositionMotor() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return static_cast<uint16_t>(lastQuickPositionMotor_);
     }
 
     uint16_t lastEnableMotor() const
@@ -132,6 +195,24 @@ public:
         hasFault_ = value;
     }
 
+    void setFeedbackPosition(int64_t value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feedbackPosition_ = value;
+    }
+
+    void setFeedbackVelocity(int16_t value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feedbackVelocity_ = value;
+    }
+
+    void setFeedbackCurrent(int16_t value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        feedbackCurrent_ = value;
+    }
+
     int stopCalls() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -152,11 +233,18 @@ private:
     int32_t lastPosition_{0};
     int setPositionCalls_{0};
 
+    MotorID lastQuickPositionMotor_{MotorID::LeftWheel};
+    int32_t lastQuickPosition_{0};
+    int quickSetPositionCalls_{0};
+
     MotorID lastEnableMotor_{MotorID::LeftWheel};
     int enableCalls_{0};
     int stopCalls_{0};
     bool enabled_{true};
     bool hasFault_{false};
+    int64_t feedbackPosition_{0};
+    int16_t feedbackVelocity_{0};
+    int16_t feedbackCurrent_{0};
 };
 
 class FakeDeviceManager : public IDeviceManager {
@@ -240,6 +328,20 @@ protected:
         joints[0]["control_mode"] = "velocity";
         joints[0]["velocity_scale"] = 0.1;
         joints[0]["position_scale"] = 1.0;
+        return joints;
+    }
+
+    static XmlRpc::XmlRpcValue makeSingleCspJoint()
+    {
+        XmlRpc::XmlRpcValue joints;
+        joints.setSize(1);
+        joints[0]["name"] = "test_arm";
+        joints[0]["motor_id"] = 0x05;
+        joints[0]["protocol"] = "PP";
+        joints[0]["can_device"] = "fake0";
+        joints[0]["control_mode"] = "csp";
+        joints[0]["position_scale"] = 65536;
+        joints[0]["velocity_scale"] = 65536;
         return joints;
     }
 
@@ -468,6 +570,94 @@ TEST_F(CanDriverHWSmokeTest, WriteHoldAfterDeviceRecoverClearsStaleDirectCommand
     hw.write(ros::Time::now(), ros::Duration(0.01));
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 40);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprConfig)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(16384);
+    fakeDm->protocol()->setFeedbackVelocity(512);
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_init"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
+
+    std::mutex stateMutex;
+    can_driver::MotorState latestState;
+    bool gotState = false;
+    ros::Subscriber stateSub = nh.subscribe<can_driver::MotorState>(
+        pnh.resolveName("motor_states"), 1,
+        [&stateMutex, &latestState, &gotState](const can_driver::MotorState::ConstPtr &msg) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            latestState = *msg;
+            gotState = true;
+        });
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    for (int i = 0; i < 20 && !gotState; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    ASSERT_TRUE(gotState);
+    EXPECT_EQ(latestState.motor_id, 0x05u);
+    EXPECT_EQ(latestState.position, 16384);
+    EXPECT_EQ(latestState.velocity, 512);
+    EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_POSITION);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_write"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const std::string cmdTopic = pnh.resolveName("motor/test_arm/cmd_position");
+    ros::Publisher pub = nh.advertise<std_msgs::Float64>(cmdTopic, 1);
+
+    for (int i = 0; i < 20 && pub.getNumSubscribers() == 0; ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    std_msgs::Float64 msg;
+    msg.data = 1.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    const int32_t expectedRaw =
+        static_cast<int32_t>(std::llround(1.0 / (2.0 * M_PI / 65536.0)));
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->positionCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), expectedRaw);
 
     spinner.stop();
 }
