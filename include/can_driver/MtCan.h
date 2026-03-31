@@ -126,8 +126,8 @@ public:
 
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
-    /// 执行一轮状态查询，由外部刷新 worker 调度。
-    void runRefreshCycle();
+    /// 执行一轮状态查询，由外部 refresh runtime 决定是否进入背压降载窗口。
+    void runRefreshCycle(bool queryPressureActive = false);
     /// 返回当前注册电机的建议查询周期。
     std::chrono::milliseconds refreshSleepInterval() const;
 
@@ -167,10 +167,6 @@ private:
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
     /// refresh 轮询周期计数，用于背压期分相查询。
     uint64_t refreshCycleCount_{0};
-    /// 最近一次观测到的设备 TX backpressure 计数。
-    uint64_t lastObservedTxBackpressure_{0};
-    /// 背压出现后，在若干 refresh 周期内压缩查询量。
-    uint64_t queryPressureUntilCycle_{0};
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -200,7 +196,7 @@ private:
      * @brief 设置零点（0x64）
      */
     void setZeroPosition(uint8_t motorId) const;
-    void refreshMotorStates();
+    void refreshMotorStates(bool queryPressureActive);
     void stopRefreshLoop();
     /**
      * @brief 通用加减速写入（0x43）
@@ -235,7 +231,6 @@ private:
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t command);
     static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
                                                            std::chrono::milliseconds baseTimeout);
-    static constexpr uint64_t kQueryPressureHoldCycles = 20;
 };
 
 #endif // MTCAN_H

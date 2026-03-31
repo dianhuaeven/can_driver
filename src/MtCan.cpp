@@ -17,11 +17,6 @@ constexpr uint16_t kResponseBaseId = 0x240;
 constexpr int32_t kDefaultPositionSpeedDps = 100;
 constexpr std::size_t kQueriesPerMotorPerCycle = 3;
 
-struct DeviceRefreshPressureSnapshot {
-    bool deviceHealthSeen{false};
-    std::uint64_t txBackpressure{0};
-};
-
 int16_t readInt16LE(const CanTransport::Frame &frame, std::size_t index)
 {
     if (index + 1 >= frame.dlc) {
@@ -58,22 +53,6 @@ int64_t readInt48LE(const CanTransport::Frame &frame, std::size_t index)
     return v;
 }
 
-DeviceRefreshPressureSnapshot makeDeviceRefreshPressureSnapshot(
-    const std::shared_ptr<can_driver::SharedDriverState> &sharedState,
-    const std::string &deviceName)
-{
-    DeviceRefreshPressureSnapshot snapshot;
-    if (!sharedState || deviceName.empty()) {
-        return snapshot;
-    }
-
-    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
-    if (sharedState->getDeviceHealth(deviceName, &deviceHealth)) {
-        snapshot.deviceHealthSeen = true;
-        snapshot.txBackpressure = deviceHealth.txBackpressure;
-    }
-    return snapshot;
-}
 } // namespace
 
 std::chrono::milliseconds MtCan::computeRefreshSleep(std::size_t motorCount) const
@@ -132,8 +111,6 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     }
     resetReadTracking();
     refreshCycleCount_ = 0;
-    lastObservedTxBackpressure_ = 0;
-    queryPressureUntilCycle_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -154,9 +131,9 @@ void MtCan::setRefreshRateHz(double hz)
     refreshRateHz_.store(hz, std::memory_order_relaxed);
 }
 
-void MtCan::runRefreshCycle()
+void MtCan::runRefreshCycle(bool queryPressureActive)
 {
-    refreshMotorStates();
+    refreshMotorStates(queryPressureActive);
 }
 
 std::chrono::milliseconds MtCan::refreshSleepInterval() const
@@ -608,7 +585,7 @@ void MtCan::setZeroPosition(uint8_t motorId) const
 }
 
 // [FIX #5] 增加多圈角度轮询
-void MtCan::refreshMotorStates()
+void MtCan::refreshMotorStates(bool queryPressureActive)
 {
     std::vector<uint8_t> motorIds;
     {
@@ -624,17 +601,6 @@ void MtCan::refreshMotorStates()
 
     for (std::size_t motorIndex = 0; motorIndex < motorIds.size(); ++motorIndex) {
         const uint8_t motorId = motorIds[motorIndex];
-        const auto snapshot = makeDeviceRefreshPressureSnapshot(sharedState_, deviceName_);
-        if (snapshot.deviceHealthSeen &&
-            snapshot.txBackpressure > lastObservedTxBackpressure_) {
-            queryPressureUntilCycle_ = std::max(
-                queryPressureUntilCycle_, cycle + kQueryPressureHoldCycles);
-        }
-        if (snapshot.deviceHealthSeen) {
-            lastObservedTxBackpressure_ = snapshot.txBackpressure;
-        }
-
-        const bool queryPressureActive = cycle < queryPressureUntilCycle_;
         if (queryPressureActive) {
             if (((cycle + motorIndex) % 2) == 0) {
                 requestState(motorId);          // 0x9C: 温度、电流、速度、编码器

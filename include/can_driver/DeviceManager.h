@@ -13,6 +13,7 @@
 #include "can_driver/SocketCanController.h"
 
 #include <atomic>
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -64,11 +65,16 @@ public:
 
 private:
     struct DeviceRefreshRuntime {
+        std::string deviceName;
+        std::weak_ptr<can_driver::SharedDriverState> sharedState;
         std::weak_ptr<MtCan> mtProtocol;
         std::weak_ptr<EyouCan> ppProtocol;
         std::shared_ptr<can_driver::DeviceRefreshWorker> worker;
         std::atomic<bool> mtActive{false};
         std::atomic<bool> ppActive{false};
+        std::uint64_t refreshCycleCount{0};
+        std::uint64_t lastObservedTxBackpressure{0};
+        std::uint64_t queryPressureUntilCycle{0};
         std::chrono::steady_clock::time_point nextMtTick {};
         std::chrono::steady_clock::time_point nextPpTick {};
         mutable std::mutex scheduleMutex;

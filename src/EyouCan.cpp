@@ -31,8 +31,6 @@ struct AxisRefreshSnapshot {
     CanProtocol::MotorMode feedbackMode{CanProtocol::MotorMode::Position};
     CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
     can_driver::AxisIntent intent{can_driver::AxisIntent::None};
-    bool deviceHealthSeen{false};
-    std::uint64_t txBackpressure{0};
 };
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
@@ -103,12 +101,6 @@ AxisRefreshSnapshot makeAxisRefreshSnapshot(
     }
 
     snapshot.intent = sharedState->getAxisIntent(axisKey);
-
-    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
-    if (sharedState->getDeviceHealth(deviceName, &deviceHealth)) {
-        snapshot.deviceHealthSeen = true;
-        snapshot.txBackpressure = deviceHealth.txBackpressure;
-    }
 
     return snapshot;
 }
@@ -188,8 +180,6 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
     }
     resetReadTracking();
     refreshCycleCount_ = 0;
-    lastObservedTxBackpressure_ = 0;
-    queryPressureUntilCycle_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -205,9 +195,9 @@ void EyouCan::setRefreshRateHz(double hz)
     refreshRateHz_.store(hz, std::memory_order_relaxed);
 }
 
-void EyouCan::runRefreshCycle()
+void EyouCan::runRefreshCycle(bool queryPressureActive)
 {
-    refreshMotorStates();
+    refreshMotorStates(queryPressureActive);
 }
 
 std::chrono::milliseconds EyouCan::refreshSleepInterval() const
@@ -999,7 +989,7 @@ void EyouCan::requestVelocity(uint8_t motorId)
     (void)tryIssueReadCommand(motorId, 0x06);
 }
 
-void EyouCan::refreshMotorStates()
+void EyouCan::refreshMotorStates(bool queryPressureActive)
 {
     std::vector<uint8_t> motorIds;
     {
@@ -1017,16 +1007,6 @@ void EyouCan::refreshMotorStates()
         const uint8_t motorId = motorIds[motorIndex];
         const auto axisKey = makeAxisKey(motorId);
         const auto snapshot = makeAxisRefreshSnapshot(sharedState_, deviceName_, axisKey);
-        if (snapshot.deviceHealthSeen &&
-            snapshot.txBackpressure > lastObservedTxBackpressure_) {
-            queryPressureUntilCycle_ = std::max(
-                queryPressureUntilCycle_, cycle + kQueryPressureHoldCycles);
-        }
-        if (snapshot.deviceHealthSeen) {
-            lastObservedTxBackpressure_ = snapshot.txBackpressure;
-        }
-
-        const bool queryPressureActive = cycle < queryPressureUntilCycle_;
         const bool priorityLifecycleQueries = needsPriorityLifecycleQueries(snapshot);
         const std::size_t pressureFeedbackPhase =
             static_cast<std::size_t>((cycle + motorIndex) % 2);
@@ -1090,7 +1070,5 @@ void EyouCan::refreshMotorStates()
 void EyouCan::stopRefreshLoop()
 {
     refreshCycleCount_ = 0;
-    lastObservedTxBackpressure_ = 0;
-    queryPressureUntilCycle_ = 0;
     resetReadTracking();
 }

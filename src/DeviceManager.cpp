@@ -8,6 +8,8 @@
 
 namespace {
 
+constexpr std::uint64_t kQueryPressureHoldCycles = 20;
+
 std::chrono::milliseconds clampRefreshSleep(std::chrono::milliseconds sleepFor)
 {
     if (sleepFor < std::chrono::milliseconds(1)) {
@@ -24,6 +26,8 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
     if (!runtime) {
         runtime = std::make_shared<DeviceRefreshRuntime>();
     }
+    runtime->deviceName = device;
+    runtime->sharedState = sharedState_;
     const auto mtIt = mtProtocols_.find(device);
     runtime->mtProtocol =
         (mtIt != mtProtocols_.end()) ? mtIt->second : std::shared_ptr<MtCan>();
@@ -43,7 +47,23 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                 return;
             }
 
+            bool queryPressureActive = false;
             const auto now = std::chrono::steady_clock::now();
+            {
+                std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+                const auto cycle = runtime->refreshCycleCount++;
+                if (const auto sharedState = runtime->sharedState.lock()) {
+                    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+                    if (sharedState->getDeviceHealth(runtime->deviceName, &deviceHealth)) {
+                        if (deviceHealth.txBackpressure > runtime->lastObservedTxBackpressure) {
+                            runtime->queryPressureUntilCycle = std::max(
+                                runtime->queryPressureUntilCycle, cycle + kQueryPressureHoldCycles);
+                        }
+                        runtime->lastObservedTxBackpressure = deviceHealth.txBackpressure;
+                    }
+                }
+                queryPressureActive = cycle < runtime->queryPressureUntilCycle;
+            }
 
             if (runtime->mtActive.load(std::memory_order_acquire)) {
                 const auto protocol = runtime->mtProtocol.lock();
@@ -54,7 +74,7 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                           (now >= runtime->nextMtTick);
                 }
                 if (protocol && due) {
-                    protocol->runRefreshCycle();
+                    protocol->runRefreshCycle(queryPressureActive);
                     const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     runtime->nextMtTick = std::chrono::steady_clock::now() + nextSleep;
@@ -73,7 +93,7 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
                           (now >= runtime->nextPpTick);
                 }
                 if (protocol && due) {
-                    protocol->runRefreshCycle();
+                    protocol->runRefreshCycle(queryPressureActive);
                     const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     runtime->nextPpTick = std::chrono::steady_clock::now() + nextSleep;

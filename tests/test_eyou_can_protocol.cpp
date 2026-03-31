@@ -102,15 +102,13 @@ public:
             eyou.managedMotorIds.insert(motorId);
         }
         eyou.refreshCycleCount_ = 0;
-        eyou.lastObservedTxBackpressure_ = 0;
-        eyou.queryPressureUntilCycle_ = 0;
         std::lock_guard<std::mutex> pendingLock(eyou.pendingReadMutex_);
         eyou.pendingReadRequests_.clear();
     }
 
-    static void refresh(EyouCan &eyou)
+    static void refresh(EyouCan &eyou, bool queryPressureActive = false)
     {
-        eyou.refreshMotorStates();
+        eyou.refreshMotorStates(queryPressureActive);
     }
 
     static void ageAllPendingRequests(EyouCan &eyou, std::chrono::milliseconds age)
@@ -394,7 +392,7 @@ TEST_F(EyouCanTest, BackpressurePrefersCriticalLifecycleQueriesOverCurrentSampli
     EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
     EyouCanTestAccessor::setRefreshCycleCount(eyou, 3);
 
-    EyouCanTestAccessor::refresh(eyou);
+    EyouCanTestAccessor::refresh(eyou, true);
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x0Fu);
@@ -432,13 +430,13 @@ TEST_F(EyouCanTest, BackpressureAlternatesFastFeedbackQueriesAcrossCycles)
     EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
     EyouCanTestAccessor::setRefreshCycleCount(eyou, 0);
 
-    EyouCanTestAccessor::refresh(eyou);
+    EyouCanTestAccessor::refresh(eyou, true);
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x07u);
 
     transport->clearSent();
     EyouCanTestAccessor::clearPendingRequests(eyou);
-    EyouCanTestAccessor::refresh(eyou);
+    EyouCanTestAccessor::refresh(eyou, true);
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
 }

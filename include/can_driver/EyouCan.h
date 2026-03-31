@@ -106,8 +106,8 @@ public:
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
-    /// 执行一轮状态查询，由外部刷新 worker 调度。
-    void runRefreshCycle();
+    /// 执行一轮状态查询，由外部 refresh runtime 决定是否进入背压降载窗口。
+    void runRefreshCycle(bool queryPressureActive = false);
     /// 返回当前注册电机的建议查询周期。
     std::chrono::milliseconds refreshSleepInterval() const;
     /// 设置是否启用 PP 快写命令（CMD=0x05）。
@@ -182,7 +182,7 @@ private:
     void requestVelocity(uint8_t motorId);
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
-    void refreshMotorStates();
+    void refreshMotorStates(bool queryPressureActive);
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     std::chrono::milliseconds computeReadRequestTimeout() const;
     void stopRefreshLoop();
@@ -209,14 +209,8 @@ private:
 
     /// refresh 轮询周期计数，用于 slow 项分频
     uint64_t refreshCycleCount_{0};
-    /// 最近一次观测到的设备 TX backpressure 计数。
-    uint64_t lastObservedTxBackpressure_{0};
-    /// 当检测到背压后，在若干 refresh 周期内压缩可选查询。
-    uint64_t queryPressureUntilCycle_{0};
     /// 高优先级状态下电流查询的分频。
     static constexpr uint64_t kPriorityCurrentDivider = 4;
-    /// 背压出现后保持 query 降载的周期数。
-    static constexpr uint64_t kQueryPressureHoldCycles = 20;
 };
 
 #endif // EyouCan_H

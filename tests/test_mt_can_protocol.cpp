@@ -99,15 +99,13 @@ public:
         std::lock_guard<std::mutex> lock(mt.refreshMutex);
         mt.refreshMotorIds = motorIds;
         mt.refreshCycleCount_ = 0;
-        mt.lastObservedTxBackpressure_ = 0;
-        mt.queryPressureUntilCycle_ = 0;
         std::lock_guard<std::mutex> pendingLock(mt.pendingReadMutex_);
         mt.pendingReadRequests_.clear();
     }
 
-    static void refresh(MtCan &mt)
+    static void refresh(MtCan &mt, bool queryPressureActive = false)
     {
-        mt.refreshMotorStates();
+        mt.refreshMotorStates(queryPressureActive);
     }
 
     static void ageAllPendingRequests(MtCan &mt, std::chrono::milliseconds age)
@@ -405,7 +403,7 @@ TEST_F(MtCanTest, BackpressureReducesRefreshQueriesButKeepsErrorSampling)
         });
 
     MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
-    MtCanTestAccessor::refresh(mt);
+    MtCanTestAccessor::refresh(mt, true);
 
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x9Cu);
@@ -422,13 +420,13 @@ TEST_F(MtCanTest, BackpressureAlternatesFastFeedbackQueriesAcrossCycles)
         });
 
     MtCanTestAccessor::setRefreshState(mt, {0x01}, true);
-    MtCanTestAccessor::refresh(mt);
+    MtCanTestAccessor::refresh(mt, true);
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x9Cu);
 
     transport->clearSent();
     MtCanTestAccessor::clearPendingRequests(mt);
-    MtCanTestAccessor::refresh(mt);
+    MtCanTestAccessor::refresh(mt, true);
     ASSERT_EQ(transport->sentFrames.size(), 2u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x92u);
 }
