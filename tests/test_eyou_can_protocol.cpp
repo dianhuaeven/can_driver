@@ -395,8 +395,52 @@ TEST_F(EyouCanTest, BackpressurePrefersCriticalLifecycleQueriesOverCurrentSampli
     EyouCanTestAccessor::setRefreshCycleCount(eyou, 3);
 
     EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 3u);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0Fu);
+}
+
+TEST_F(EyouCanTest, BackpressureAlternatesFastFeedbackQueriesAcrossCycles)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+
+    sharedState->mutateAxisFeedback(
+        axisKey,
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = nowNs;
+        });
+    sharedState->mutateAxisCommand(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->desiredMode = CanProtocol::MotorMode::Position;
+            command->desiredModeValid = true;
+            command->valid = true;
+        });
+    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
+    sharedState->mutateDeviceHealth(
+        "can0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+            health->txBackpressure = 1;
+        });
+
+    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+    EyouCanTestAccessor::setRefreshCycleCount(eyou, 0);
+
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x07u);
+
+    transport->clearSent();
+    EyouCanTestAccessor::clearPendingRequests(eyou);
+    EyouCanTestAccessor::refresh(eyou);
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

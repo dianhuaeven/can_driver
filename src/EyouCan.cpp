@@ -1015,10 +1015,6 @@ void EyouCan::refreshMotorStates()
 
     for (std::size_t motorIndex = 0; motorIndex < motorIds.size(); ++motorIndex) {
         const uint8_t motorId = motorIds[motorIndex];
-        // 位置 + 速度：每周期都查（控制闭环需要）
-        requestPosition(motorId);
-        requestVelocity(motorId);
-
         const auto axisKey = makeAxisKey(motorId);
         const auto snapshot = makeAxisRefreshSnapshot(sharedState_, deviceName_, axisKey);
         if (snapshot.deviceHealthSeen &&
@@ -1032,21 +1028,17 @@ void EyouCan::refreshMotorStates()
 
         const bool queryPressureActive = cycle < queryPressureUntilCycle_;
         const bool priorityLifecycleQueries = needsPriorityLifecycleQueries(snapshot);
+        const std::size_t pressureFeedbackPhase =
+            static_cast<std::size_t>((cycle + motorIndex) % 2);
 
-        if (priorityLifecycleQueries && !queryPressureActive) {
-            requestMode(motorId);
-            requestEnable(motorId);
-            requestFault(motorId);
-            if (((cycle + motorIndex) % kPriorityCurrentDivider) == 0) {
-                requestCurrent(motorId);
-            }
-            continue;
-        }
-
-        const std::size_t criticalPhase = static_cast<std::size_t>((cycle + motorIndex) % 3);
-        const std::size_t steadyPhase = static_cast<std::size_t>((cycle + motorIndex) % 4);
         if (queryPressureActive) {
-            switch (criticalPhase) {
+            if (pressureFeedbackPhase == 0) {
+                requestPosition(motorId);
+            } else {
+                requestVelocity(motorId);
+            }
+
+            switch (static_cast<std::size_t>((cycle + motorIndex) % 3)) {
             case 0:
                 requestMode(motorId);
                 break;
@@ -1061,6 +1053,22 @@ void EyouCan::refreshMotorStates()
             continue;
         }
 
+        // 位置 + 速度：正常压力下每周期都查（控制闭环需要）
+        requestPosition(motorId);
+        requestVelocity(motorId);
+
+        if (priorityLifecycleQueries) {
+            requestMode(motorId);
+            requestEnable(motorId);
+            requestFault(motorId);
+            if (((cycle + motorIndex) % kPriorityCurrentDivider) == 0) {
+                requestCurrent(motorId);
+            }
+            continue;
+        }
+
+        const std::size_t criticalPhase = static_cast<std::size_t>((cycle + motorIndex) % 3);
+        const std::size_t steadyPhase = static_cast<std::size_t>((cycle + motorIndex) % 4);
         switch (steadyPhase) {
         case 0:
             requestMode(motorId);
