@@ -249,6 +249,7 @@ TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
 
     command.valid = true;
     command.desiredMode = CanProtocol::MotorMode::Position;
+    command.desiredModeValid = true;
     feedback.mode = CanProtocol::MotorMode::Position;
     feedback.lastModeMatchSteadyNs = nowNs;
 
@@ -327,6 +328,43 @@ TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
         &deviceHealth,
         feedback.lastRxSteadyNs);
     EXPECT_EQ(recovered.state, can_driver::AxisRuntimeState::Armed);
+}
+
+TEST(AxisRuntimeTest, ArmedAxisStillRequiresSelectedModeToMatchBeforeRelease)
+{
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    can_driver::AxisRuntime runtime;
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    feedback.key = key;
+    feedback.feedbackSeen = true;
+    feedback.enabled = true;
+    feedback.mode = CanProtocol::MotorMode::Position;
+    feedback.lastRxSteadyNs = nowNs;
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    command.key = key;
+    command.desiredMode = CanProtocol::MotorMode::Velocity;
+    command.desiredModeValid = true;
+    command.valid = false;
+
+    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+    deviceHealth.device = "fake1";
+    deviceHealth.transportReady = true;
+
+    const auto armedBlocked = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(armedBlocked.state, can_driver::AxisRuntimeState::Armed);
+    EXPECT_FALSE(can_driver::AxisRuntime::MotionReady(armedBlocked));
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(armedBlocked), "Mode not ready.");
+
+    feedback.mode = CanProtocol::MotorMode::Velocity;
+    feedback.lastModeMatchSteadyNs = nowNs;
+    const auto armedReady = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(armedReady.state, can_driver::AxisRuntimeState::Armed);
+    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(armedReady));
 }
 
 TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
@@ -502,6 +540,7 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisRuntimeForPpModeMismatch)
         [](can_driver::SharedDriverState::AxisCommandState *command) {
             command->valid = true;
             command->desiredMode = CanProtocol::MotorMode::Position;
+            command->desiredModeValid = true;
         });
     deviceManager->sharedState()->setAxisIntent(key, can_driver::AxisIntent::Enable);
 
@@ -539,6 +578,7 @@ TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeMatchTimestampAfterCom
         [](can_driver::SharedDriverState::AxisCommandState *command) {
             command->valid = true;
             command->desiredMode = CanProtocol::MotorMode::Position;
+            command->desiredModeValid = true;
         });
     deviceManager->sharedState()->setAxisIntent(key, can_driver::AxisIntent::Enable);
 
@@ -551,6 +591,7 @@ TEST(LifecycleDriverOpsTest, MotionHealthyRejectsStaleModeMatchTimestampAfterCom
         [](can_driver::SharedDriverState::AxisCommandState *command) {
             command->valid = true;
             command->desiredMode = CanProtocol::MotorMode::Velocity;
+            command->desiredModeValid = true;
         });
 
     EXPECT_FALSE(ops.motionHealthy(&detail));

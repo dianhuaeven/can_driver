@@ -181,7 +181,7 @@ bool EyouCan::setMode(MotorID Id, MotorMode mode)
         std::lock_guard<std::mutex> stateLock(stateMutex);
         motorStates[motorId].mode = mode;
     }
-    syncSharedCommand(motorId, 0, 0, mode, true);
+    syncSharedModeSelection(motorId, mode);
 
     uint32_t modeValue;
     switch (mode) {
@@ -660,8 +660,28 @@ void EyouCan::syncSharedCommand(uint8_t motorId,
             command->targetPosition = targetPosition;
             command->targetVelocity = targetVelocity;
             command->desiredMode = desiredMode;
+            command->desiredModeValid = true;
             command->valid = valid;
-            command->lastCommandSteadyNs = nowNs;
+            command->lastCommandSteadyNs = valid ? nowNs : 0;
+        });
+}
+
+void EyouCan::syncSharedModeSelection(uint8_t motorId, MotorMode desiredMode) const
+{
+    if (!sharedState_ || deviceName_.empty()) {
+        return;
+    }
+
+    sharedState_->mutateAxisCommand(
+        makeAxisKey(motorId),
+        [desiredMode](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->targetPosition = 0;
+            command->targetVelocity = 0;
+            command->targetCurrent = 0;
+            command->desiredMode = desiredMode;
+            command->desiredModeValid = true;
+            command->valid = false;
+            command->lastCommandSteadyNs = 0;
         });
 }
 

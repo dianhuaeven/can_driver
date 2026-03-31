@@ -50,6 +50,7 @@ struct AxisRuntimeStatus {
     bool fault{false};
     bool enabled{false};
     bool commandValid{false};
+    bool modeExpected{false};
     bool modeMatched{true};
 };
 
@@ -117,7 +118,7 @@ public:
             return status.modeMatched;
         }
         if (status.state == AxisRuntimeState::Armed) {
-            return true;
+            return status.modeMatched;
         }
         return false;
     }
@@ -163,6 +164,7 @@ private:
         status.fault = feedback.fault;
         status.enabled = feedback.enabled;
         status.commandValid = command != nullptr && command->valid;
+        status.modeExpected = command != nullptr && command->desiredModeValid;
 
         status.feedbackFresh = status.feedbackSeen && feedback.lastRxSteadyNs > 0;
         if (status.feedbackFresh && config_.feedbackFreshnessTimeoutNs > 0 &&
@@ -171,7 +173,7 @@ private:
                 (nowNs - feedback.lastRxSteadyNs) <= config_.feedbackFreshnessTimeoutNs;
         }
 
-        if (status.commandValid) {
+        if (status.modeExpected) {
             const bool timestampMatched =
                 feedback.feedbackSeen && feedback.lastRxSteadyNs > 0 &&
                 feedback.lastModeMatchSteadyNs >= feedback.lastRxSteadyNs;

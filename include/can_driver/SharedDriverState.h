@@ -71,6 +71,7 @@ public:
         std::int32_t targetVelocity{0};
         std::int32_t targetCurrent{0};
         CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
+        bool desiredModeValid{false};
         bool valid{false};
         std::uint64_t epoch{0};
         std::int64_t lastCommandSteadyNs{0};
@@ -351,8 +352,8 @@ private:
         const auto commandIt = axisCommands_.find(mapKey);
         if (commandIt != axisCommands_.end()) {
             const auto &command = commandIt->second;
-            if (command.valid && feedback.feedbackSeen && feedback.mode == command.desiredMode &&
-                nowNs > 0) {
+            if (command.desiredModeValid && feedback.feedbackSeen &&
+                feedback.mode == command.desiredMode && nowNs > 0) {
                 feedback.lastModeMatchSteadyNs = nowNs;
             } else {
                 feedback.lastModeMatchSteadyNs = 0;

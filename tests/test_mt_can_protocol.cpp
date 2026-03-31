@@ -215,8 +215,27 @@ TEST_F(MtCanTest, CommandsPopulateSharedStateIntentAndTargets)
     EXPECT_EQ(command.targetPosition, 0);
     EXPECT_EQ(command.targetVelocity, 4321);
     EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Velocity);
+    EXPECT_TRUE(command.desiredModeValid);
     EXPECT_TRUE(command.valid);
     EXPECT_EQ(sharedState->getAxisIntent(axisKey), can_driver::AxisIntent::Enable);
+}
+
+TEST_F(MtCanTest, SetModeUpdatesDesiredModeWithoutPretendingMotionCommandExists)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+
+    ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
+    ASSERT_TRUE(mt.setMode(kMotorId, CanProtocol::MotorMode::Position));
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    ASSERT_TRUE(sharedState->getAxisCommand(axisKey, &command));
+    EXPECT_EQ(command.desiredMode, CanProtocol::MotorMode::Position);
+    EXPECT_TRUE(command.desiredModeValid);
+    EXPECT_FALSE(command.valid);
+    EXPECT_EQ(command.targetPosition, 0);
+    EXPECT_EQ(command.targetVelocity, 0);
+    EXPECT_EQ(command.lastCommandSteadyNs, 0);
 }
 
 TEST_F(MtCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)

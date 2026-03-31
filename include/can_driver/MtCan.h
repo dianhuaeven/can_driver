@@ -223,6 +223,7 @@ private:
                            int32_t targetVelocity,
                            MotorMode desiredMode,
                            bool valid) const;
+    void syncSharedModeSelection(uint8_t motorId, MotorMode desiredMode) const;
     void syncSharedIntent(uint8_t motorId, can_driver::AxisIntent intent) const;
     void noteSharedTimeout(uint8_t motorId, std::size_t consecutiveTimeouts) const;
     static uint16_t pendingReadKey(uint8_t motorId, uint8_t command);
