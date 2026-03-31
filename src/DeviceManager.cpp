@@ -129,6 +129,7 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
                 health->txLinkUnavailable = stats.txLinkUnavailable;
                 health->txError = stats.txError;
                 health->rxError = stats.rxError;
+                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
                 health->lastRxSteadyNs = stats.lastRxSteadyNs;
             });
     }
@@ -216,6 +217,7 @@ bool DeviceManager::initDevice(const std::string &device,
                 health->txLinkUnavailable = stats.txLinkUnavailable;
                 health->txError = stats.txError;
                 health->rxError = stats.rxError;
+                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
                 health->lastRxSteadyNs = stats.lastRxSteadyNs;
             });
     }
@@ -337,6 +339,7 @@ void DeviceManager::shutdownAll()
                     health->txLinkUnavailable = stats.txLinkUnavailable;
                     health->txError = stats.txError;
                     health->rxError = stats.rxError;
+                    health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
                     health->lastRxSteadyNs = stats.lastRxSteadyNs;
                 });
         }
@@ -391,9 +394,12 @@ bool DeviceManager::isDeviceReady(const std::string &device) const
     if (it == transports_.end() || !it->second) {
         return false;
     }
-    const bool ready = it->second->isReady();
+    const auto stats = it->second->snapshotStats();
+    const bool linkRecovered =
+        stats.lastTxLinkUnavailableSteadyNs == 0 ||
+        stats.lastRxSteadyNs > stats.lastTxLinkUnavailableSteadyNs;
+    const bool ready = it->second->isReady() && linkRecovered;
     if (sharedState_) {
-        const auto stats = it->second->snapshotStats();
         sharedState_->mutateDeviceHealth(
             device,
             [ready, &stats](can_driver::SharedDriverState::DeviceHealthState *health) {
@@ -402,6 +408,7 @@ bool DeviceManager::isDeviceReady(const std::string &device) const
                 health->txLinkUnavailable = stats.txLinkUnavailable;
                 health->txError = stats.txError;
                 health->rxError = stats.rxError;
+                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
                 health->lastRxSteadyNs = stats.lastRxSteadyNs;
             });
     }

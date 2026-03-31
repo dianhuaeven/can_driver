@@ -26,6 +26,7 @@
  * 但可以按需同时挂载 MT/PP 两套协议对象。
  */
 class DeviceManager : public IDeviceManager {
+    friend class DeviceManagerTestAccessor;
 public:
     /// 确保底层传输已建立。重复调用是幂等的。
     bool ensureTransport(const std::string &device, bool loopback = false) override;

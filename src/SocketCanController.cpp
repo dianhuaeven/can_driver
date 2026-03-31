@@ -134,6 +134,8 @@ SocketCanController::Stats SocketCanController::snapshotStats() const {
   stats.rxOk = rxOkCount_.load(std::memory_order_relaxed);
   stats.rxError = rxErrorCount_.load(std::memory_order_relaxed);
   stats.rxShortRead = rxShortReadCount_.load(std::memory_order_relaxed);
+  stats.lastTxLinkUnavailableSteadyNs =
+      lastTxLinkUnavailableSteadyNs_.load(std::memory_order_relaxed);
   stats.lastRxSteadyNs = lastRxSteadyNs_.load(std::memory_order_relaxed);
   return stats;
 }
@@ -167,6 +169,7 @@ CanTransport::SendResult SocketCanController::send(const CanTransport::Frame &fr
     }
     if (isLinkUnavailableSendError(errorCode)) {
       txLinkUnavailableCount_.fetch_add(1, std::memory_order_relaxed);
+      lastTxLinkUnavailableSteadyNs_.store(steadyNowNs(), std::memory_order_relaxed);
       const auto stats = snapshotStats();
       ROS_WARN_STREAM_THROTTLE(1.0,
                                "[SocketCanController] CAN link unavailable on " << deviceName_
@@ -357,5 +360,6 @@ void SocketCanController::resetStats() {
   rxOkCount_.store(0, std::memory_order_relaxed);
   rxErrorCount_.store(0, std::memory_order_relaxed);
   rxShortReadCount_.store(0, std::memory_order_relaxed);
+  lastTxLinkUnavailableSteadyNs_.store(0, std::memory_order_relaxed);
   lastRxSteadyNs_.store(0, std::memory_order_relaxed);
 }

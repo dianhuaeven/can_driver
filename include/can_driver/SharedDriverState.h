@@ -83,6 +83,7 @@ public:
         std::uint64_t txLinkUnavailable{0};
         std::uint64_t txError{0};
         std::uint64_t rxError{0};
+        std::int64_t lastTxLinkUnavailableSteadyNs{0};
         std::int64_t lastRxSteadyNs{0};
     };
 

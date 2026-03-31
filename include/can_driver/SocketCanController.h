@@ -18,6 +18,7 @@
  */
 class SocketCanController : public CanTransport {
     friend class SocketCanControllerTestAccessor;
+    friend class DeviceManagerTestAccessor;
 
 public:
     struct Stats {
@@ -29,6 +30,7 @@ public:
         std::uint64_t rxOk{0};
         std::uint64_t rxError{0};
         std::uint64_t rxShortRead{0};
+        std::int64_t lastTxLinkUnavailableSteadyNs{0};
         std::int64_t lastRxSteadyNs{0};
     };
 
@@ -77,6 +79,7 @@ private:
     std::atomic<std::uint64_t> rxOkCount_{0};
     std::atomic<std::uint64_t> rxErrorCount_{0};
     std::atomic<std::uint64_t> rxShortReadCount_{0};
+    std::atomic<std::int64_t> lastTxLinkUnavailableSteadyNs_{0};
     std::atomic<std::int64_t> lastRxSteadyNs_{0};
     std::unordered_map<std::size_t, ReceiveHandler> handlers_;
     mutable std::mutex handlerMutex_;

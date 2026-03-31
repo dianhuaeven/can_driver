@@ -23,6 +23,7 @@ public:
     c.rxOkCount_.store(6);
     c.rxErrorCount_.store(7);
     c.rxShortReadCount_.store(8);
+    c.lastTxLinkUnavailableSteadyNs_.store(10);
     c.lastRxSteadyNs_.store(9);
   }
 };
@@ -85,6 +86,7 @@ TEST(SocketCanController, ShutdownResetsState){
   EXPECT_EQ(stats.rxOk, 0u);
   EXPECT_EQ(stats.rxError, 0u);
   EXPECT_EQ(stats.rxShortRead, 0u);
+  EXPECT_EQ(stats.lastTxLinkUnavailableSteadyNs, 0);
   EXPECT_EQ(stats.lastRxSteadyNs, 0);
 }
 

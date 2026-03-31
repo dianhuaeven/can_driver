@@ -9,6 +9,29 @@
 #include <filesystem>
 #include <thread>
 
+class DeviceManagerTestAccessor {
+public:
+    static void injectTransport(DeviceManager &dm,
+                                const std::string &device,
+                                std::shared_ptr<SocketCanController> transport)
+    {
+        dm.transports_[device] = std::move(transport);
+        dm.deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
+    }
+
+    static void seedTransportHealth(SocketCanController &transport,
+                                    bool initialized,
+                                    std::uint64_t txLinkUnavailable,
+                                    std::int64_t lastTxLinkUnavailableSteadyNs,
+                                    std::int64_t lastRxSteadyNs)
+    {
+        transport.initialized_.store(initialized);
+        transport.txLinkUnavailableCount_.store(txLinkUnavailable);
+        transport.lastTxLinkUnavailableSteadyNs_.store(lastTxLinkUnavailableSteadyNs);
+        transport.lastRxSteadyNs_.store(lastRxSteadyNs);
+    }
+};
+
 namespace {
 
 class RosTimeFixture : public ::testing::Test {
@@ -177,4 +200,48 @@ TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)
     ASSERT_NE(newPp, nullptr);
     EXPECT_NE(newMt, oldMt);
     EXPECT_NE(newPp, oldPp);
+}
+
+TEST_F(RosTimeFixture, IsDeviceReadyDropsImmediatelyAfterRecentLinkDown)
+{
+    DeviceManager dm;
+    auto transport = std::make_shared<SocketCanController>();
+    DeviceManagerTestAccessor::injectTransport(dm, "fake0", transport);
+    DeviceManagerTestAccessor::seedTransportHealth(
+        *transport,
+        true,
+        1,
+        200,
+        100);
+
+    EXPECT_FALSE(dm.isDeviceReady("fake0"));
+
+    can_driver::SharedDriverState::DeviceHealthState health;
+    ASSERT_TRUE(dm.getSharedDriverState()->getDeviceHealth("fake0", &health));
+    EXPECT_FALSE(health.transportReady);
+    EXPECT_EQ(health.txLinkUnavailable, 1u);
+    EXPECT_EQ(health.lastTxLinkUnavailableSteadyNs, 200);
+    EXPECT_EQ(health.lastRxSteadyNs, 100);
+}
+
+TEST_F(RosTimeFixture, IsDeviceReadyRecoversAfterRxNewerThanLinkDown)
+{
+    DeviceManager dm;
+    auto transport = std::make_shared<SocketCanController>();
+    DeviceManagerTestAccessor::injectTransport(dm, "fake0", transport);
+    DeviceManagerTestAccessor::seedTransportHealth(
+        *transport,
+        true,
+        1,
+        100,
+        200);
+
+    EXPECT_TRUE(dm.isDeviceReady("fake0"));
+
+    can_driver::SharedDriverState::DeviceHealthState health;
+    ASSERT_TRUE(dm.getSharedDriverState()->getDeviceHealth("fake0", &health));
+    EXPECT_TRUE(health.transportReady);
+    EXPECT_EQ(health.txLinkUnavailable, 1u);
+    EXPECT_EQ(health.lastTxLinkUnavailableSteadyNs, 100);
+    EXPECT_EQ(health.lastRxSteadyNs, 200);
 }
