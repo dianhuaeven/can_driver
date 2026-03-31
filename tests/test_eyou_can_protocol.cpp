@@ -243,6 +243,9 @@ TEST_F(EyouCanTest, IssueRefreshQueryMapsEnumsToExpectedSubcommands)
         EXPECT_EQ(request.category, CanTxDispatcher::Category::Query);
         EXPECT_STREQ(request.source, "EyouCan::sendReadCommand");
     }
+    for (const auto &frame : transport->sentFrames) {
+        EXPECT_EQ(frame.dlc, 2u);
+    }
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x07u);
     EXPECT_EQ(transport->sentFrames[1].data[1], 0x06u);
     EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);

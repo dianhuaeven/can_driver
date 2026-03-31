@@ -546,8 +546,9 @@ void EyouCan::sendReadCommand(uint8_t motorId, uint8_t subCommand)
     frame.id = kEyouIdFrameBase + motorId;
     frame.isExtended = false;
     frame.isRemoteRequest = false;
-    // [FIX #10] 统一 DLC 为 8
-    frame.dlc = 8;
+    // 某些固件对补零后的长读帧（DLC=8）不会返回 0x04 应答；
+    // 读取命令语义只需要 CMD + ADDR，恢复为紧凑短帧以保持兼容。
+    frame.dlc = 2;
     frame.data.fill(0);
     frame.data[0] = kReadCommand;
     frame.data[1] = subCommand;
