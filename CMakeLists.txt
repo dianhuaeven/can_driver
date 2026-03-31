@@ -381,6 +381,26 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
+  catkin_add_gtest(test_eyou_can_csp
+    tests/test_eyou_can_csp.cpp
+  )
+  if(TARGET test_eyou_can_csp)
+    target_include_directories(test_eyou_can_csp PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_eyou_can_csp
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_eyou_can_csp
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
   catkin_add_gtest(test_can_driver_hw_smoke
     tests/test_can_driver_hw_smoke.cpp
   )
