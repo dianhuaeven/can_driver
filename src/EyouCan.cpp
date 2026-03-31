@@ -159,6 +159,17 @@ void EyouCan::setFastWriteEnabled(bool enabled)
     publishWriteCountersParam();
 }
 
+void EyouCan::setDefaultPositionVelocityRaw(int32_t velocityRaw)
+{
+    if (velocityRaw <= 0) {
+        ROS_WARN("[EyouCan] Ignore invalid default position velocity raw=%d, keep %d.",
+                 velocityRaw,
+                 defaultPositionVelocityRaw_.load(std::memory_order_relaxed));
+        return;
+    }
+    defaultPositionVelocityRaw_.store(velocityRaw, std::memory_order_relaxed);
+}
+
 uint64_t EyouCan::fastWriteSentCount() const
 {
     return fastWriteSentCount_.load(std::memory_order_relaxed);
@@ -236,7 +247,10 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
     registerManagedMotorId(motorId);
     {
         std::lock_guard<std::mutex> stateLock(stateMutex);
-        motorStates[motorId].commandedVelocity = velocity;
+        auto &state = motorStates[motorId];
+        state.commandedVelocity = velocity;
+        state.lastPositionVelocityRaw = velocity;
+        state.positionVelocityConfigured = true;
     }
     syncSharedCommand(motorId, 0, velocity, MotorMode::Velocity, true);
     const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
@@ -247,6 +261,45 @@ bool EyouCan::setVelocity(MotorID Id, int32_t velocity)
         sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4, kWriteCommand);
     } else {
         sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocity), 4, kWriteCommand);
+    }
+    return true;
+}
+
+bool EyouCan::ensurePositionVelocityConfigured(uint8_t motorId,
+                                               int32_t velocityRaw,
+                                               bool forceWrite)
+{
+    if (velocityRaw <= 0) {
+        ROS_WARN_THROTTLE(1.0,
+                          "[EyouCan] Motor %u invalid position velocity raw=%d, skip 0x09.",
+                          static_cast<unsigned>(motorId),
+                          velocityRaw);
+        return false;
+    }
+
+    bool shouldWrite = forceWrite;
+    {
+        std::lock_guard<std::mutex> stateLock(stateMutex);
+        auto &state = motorStates[motorId];
+        state.commandedVelocity = velocityRaw;
+        if (forceWrite || !state.positionVelocityConfigured ||
+            state.lastPositionVelocityRaw != velocityRaw) {
+            state.lastPositionVelocityRaw = velocityRaw;
+            state.positionVelocityConfigured = true;
+            shouldWrite = true;
+        }
+    }
+
+    if (!shouldWrite) {
+        return true;
+    }
+
+    const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
+    if (fastWrite) {
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocityRaw), 4, kFastWriteCommand);
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocityRaw), 4, kWriteCommand);
+    } else {
+        sendWriteCommand(motorId, 0x09, static_cast<uint32_t>(velocityRaw), 4, kWriteCommand);
     }
     return true;
 }
@@ -287,17 +340,17 @@ bool EyouCan::setPosition(MotorID Id, int32_t position)
         motorStates[motorId].commandedPosition = position;
     }
     syncSharedCommand(motorId, position, 0, MotorMode::Position, true);
+    const int32_t positionVelocityRaw =
+        defaultPositionVelocityRaw_.load(std::memory_order_relaxed);
+    if (!ensurePositionVelocityConfigured(motorId, positionVelocityRaw, true)) {
+        return false;
+    }
     const bool fastWrite = fastWriteEnabled_.load(std::memory_order_relaxed);
-    // 协议示例：先设置速度，再设置位置（位置模式需目标速度）
-    // 10 RPM = 10 * 65536 / 60 ≈ 10922.666，取 0x00002AAA
     if (fastWrite) {
-        // 兼容策略：先发快写（满足”快写模式”），再补发普通写（确保动作触发）。
-        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kFastWriteCommand);
+        // 兼容策略：快写位置后补普通写，兼顾立即生效和老固件触发行为。
         sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
-        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
         sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kWriteCommand);
     } else {
-        sendWriteCommand(motorId, 0x09, 0x00002AAA, 4, kWriteCommand);
         sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kWriteCommand);
     }
     return true;
@@ -315,6 +368,11 @@ bool EyouCan::quickSetPosition(MotorID Id, int32_t position)
         motorStates[motorId].commandedPosition = position;
     }
     syncSharedCommand(motorId, position, 0, MotorMode::CSP, true);
+    const int32_t positionVelocityRaw =
+        defaultPositionVelocityRaw_.load(std::memory_order_relaxed);
+    if (!ensurePositionVelocityConfigured(motorId, positionVelocityRaw, false)) {
+        return false;
+    }
     // CSP 模式：使用快写命令（CMD=0x05），只发送位置帧，无需等待返回
     sendWriteCommand(motorId, 0x0A, static_cast<uint32_t>(position), 4, kFastWriteCommand);
     return true;

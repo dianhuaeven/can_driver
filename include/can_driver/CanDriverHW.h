@@ -130,6 +130,7 @@ private:
     int directCmdQueueSize_{1};
     bool debugBypassRosControl_{false};
     bool ppFastWriteEnabled_{false};
+    int ppDefaultPositionVelocityRaw_{EyouCan::kDefaultPositionVelocityRaw};
     double startupPositionSyncTimeoutSec_{1.0};
     double startupProbeQueryHz_{5.0};
     bool safetyStopOnFault_{true};

@@ -19,6 +19,7 @@ class EyouCan : public CanProtocol {
     friend class EyouCanTestAccessor;
 
 public:
+    static constexpr int32_t kDefaultPositionVelocityRaw = 0x00002AAA;
 
     /**
      * @brief 构造函数
@@ -111,6 +112,8 @@ public:
     std::chrono::milliseconds refreshSleepInterval() const;
     /// 设置是否启用 PP 快写命令（CMD=0x05）。
     void setFastWriteEnabled(bool enabled);
+    /// 设置位置/CSP 命令默认预配置速度（0x09，协议原始单位）。
+    void setDefaultPositionVelocityRaw(int32_t velocityRaw);
     uint64_t fastWriteSentCount() const;
     uint64_t normalWriteSentCount() const;
     using RefreshQuery = can_driver::PpRefreshQuery;
@@ -128,11 +131,13 @@ private:
         int32_t current = 0;
         int32_t acceleration = 0;
         int32_t deceleration = 0;
+        int32_t lastPositionVelocityRaw = kDefaultPositionVelocityRaw;
         bool enabled = false;
         bool fault = false;
         bool positionReceived = false;
         bool velocityReceived = false;
         bool currentReceived = false;
+        bool positionVelocityConfigured = false;
         MotorMode mode = MotorMode::Position;
     };
     struct PendingReadRequest {
@@ -154,6 +159,7 @@ private:
     mutable std::mutex refreshMutex;
     std::atomic<double> refreshRateHz_{0.0};
     std::atomic<bool> fastWriteEnabled_{false};
+    std::atomic<int32_t> defaultPositionVelocityRaw_{kDefaultPositionVelocityRaw};
     std::atomic<uint64_t> fastWriteSentCount_{0};
     std::atomic<uint64_t> normalWriteSentCount_{0};
     mutable std::mutex pendingReadMutex_;
@@ -190,6 +196,7 @@ private:
     bool submitTx(const CanTransport::Frame &frame,
                   CanTxDispatcher::Category category,
                   const char *source) const;
+    bool ensurePositionVelocityConfigured(uint8_t motorId, int32_t velocityRaw, bool forceWrite);
     bool tryIssueReadCommand(uint8_t motorId, uint8_t subCommand);
     void markReadResponseReceived(uint8_t motorId, uint8_t subCommand);
     void resetReadTracking();

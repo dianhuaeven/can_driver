@@ -172,6 +172,15 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
     }
+    if (!pnh.getParam("pp_default_position_velocity_raw", ppDefaultPositionVelocityRaw_)) {
+        ppDefaultPositionVelocityRaw_ = EyouCan::kDefaultPositionVelocityRaw;
+    }
+    if (ppDefaultPositionVelocityRaw_ <= 0) {
+        ROS_WARN("[CanDriverHW] Invalid pp_default_position_velocity_raw=%d, fallback to %d.",
+                 ppDefaultPositionVelocityRaw_,
+                 EyouCan::kDefaultPositionVelocityRaw);
+        ppDefaultPositionVelocityRaw_ = EyouCan::kDefaultPositionVelocityRaw;
+    }
     if (!pnh.getParam("safety_stop_on_fault", safetyStopOnFault_)) {
         safetyStopOnFault_ = true;
     }
@@ -191,12 +200,15 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
     }
 
     deviceManager_->setPpFastWriteEnabled(ppFastWriteEnabled_);
+    deviceManager_->setPpDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
 
     if (motorQueryHz_ > 0.0) {
         ROS_INFO("[CanDriverHW] motor_query_hz=%.3f Hz.", motorQueryHz_);
     }
     ROS_INFO("[CanDriverHW] pp_fast_write_enabled=%s.",
              ppFastWriteEnabled_ ? "true" : "false");
+    ROS_INFO("[CanDriverHW] pp_default_position_velocity_raw=%d.",
+             ppDefaultPositionVelocityRaw_);
     ROS_INFO("[CanDriverHW] startup_position_sync_timeout_sec=%.3f s.",
              startupPositionSyncTimeoutSec_);
     ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",

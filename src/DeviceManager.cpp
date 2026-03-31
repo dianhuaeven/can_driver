@@ -362,6 +362,7 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
                 std::make_shared<EyouCan>(transport, txDispatcher, sharedState_, device);
             eyou->setRefreshRateHz(refreshRateHz_);
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
+            eyou->setDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
             eyouProtocols_[device] = std::move(eyou);
         }
     }
@@ -443,6 +444,7 @@ bool DeviceManager::initDevice(const std::string &device,
             transportIt->second, txDispatchers_[device], sharedState_, device);
         eyou->setRefreshRateHz(refreshRateHz_);
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
+        eyou->setDefaultPositionVelocityRaw(ppDefaultPositionVelocityRaw_);
         eyouProtocols_[device] = std::move(eyou);
     }
 
@@ -572,6 +574,21 @@ void DeviceManager::setPpFastWriteEnabled(bool enabled)
     for (auto &kv : eyouProtocols_) {
         if (kv.second) {
             kv.second->setFastWriteEnabled(enabled);
+        }
+    }
+}
+
+void DeviceManager::setPpDefaultPositionVelocityRaw(int32_t velocityRaw)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    if (velocityRaw <= 0) {
+        ROS_WARN("[CanDriverHW] Ignore invalid pp_default_position_velocity_raw=%d.", velocityRaw);
+        return;
+    }
+    ppDefaultPositionVelocityRaw_ = velocityRaw;
+    for (auto &kv : eyouProtocols_) {
+        if (kv.second) {
+            kv.second->setDefaultPositionVelocityRaw(velocityRaw);
         }
     }
 }

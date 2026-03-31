@@ -327,6 +327,7 @@ public:
         refreshRateHzCalls_.push_back(hz);
     }
     void setPpFastWriteEnabled(bool) override {}
+    void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void shutdownDevice(const std::string &device) override
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);

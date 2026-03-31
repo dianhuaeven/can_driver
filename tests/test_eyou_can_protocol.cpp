@@ -173,12 +173,28 @@ TEST_F(EyouCanTest, FastWriteModeUsesCmd05ForVelocityAndPosition)
     ASSERT_EQ(transport->sentFrames.size(), 4u);
     EXPECT_EQ(transport->sentFrames[0].data[0], 0x05);
     EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
-    EXPECT_EQ(transport->sentFrames[1].data[0], 0x05);
-    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
-    EXPECT_EQ(transport->sentFrames[2].data[0], 0x01);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[1].data[0], 0x01);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[2].data[0], 0x05);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0A);
     EXPECT_EQ(transport->sentFrames[3].data[0], 0x01);
     EXPECT_EQ(transport->sentFrames[3].data[1], 0x0A);
+}
+
+TEST_F(EyouCanTest, PositionVelocityDefaultCanBeOverridden)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
+
+    eyou.setDefaultPositionVelocityRaw(0x00001234);
+
+    ASSERT_TRUE(eyou.setPosition(kMotorId, 456));
+    ASSERT_EQ(transport->sentFrames.size(), 2u);
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x09);
+    EXPECT_EQ(transport->sentFrames[0].data[2], 0x00);
+    EXPECT_EQ(transport->sentFrames[0].data[3], 0x00);
+    EXPECT_EQ(transport->sentFrames[0].data[4], 0x12);
+    EXPECT_EQ(transport->sentFrames[0].data[5], 0x34);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0A);
 }
 
 TEST_F(EyouCanTest, WritesRouteThroughUnifiedTxDispatcher)
