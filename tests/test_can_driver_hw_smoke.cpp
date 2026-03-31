@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <ros/ros.h>
 #include <ros/time.h>
+#include <std_srvs/Trigger.h>
 #include <std_msgs/Float64.h>
 
 #include "can_driver/CanDriverHW.h"
@@ -476,6 +477,144 @@ TEST_F(CanDriverHWSmokeTest, RecoverServiceRejectsPerMotorLegacyRequest)
     EXPECT_FALSE(srv.response.success);
     EXPECT_EQ(srv.response.message,
               "per-motor recover has been removed; use motor_id=65535 for global recover");
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, LifecycleServicesExposeCanonicalMessages)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_lifecycle_messages"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    can_driver::OperationalCoordinator::DriverOps ops;
+    ops.init_device = [](const std::string &, bool) {
+        return can_driver::OperationalCoordinator::Result{true, "driver init detail"};
+    };
+    ops.enable_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "driver enable detail"};
+    };
+    ops.disable_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "OK"};
+    };
+    ops.halt_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "OK"};
+    };
+    ops.recover_all = []() {
+        return can_driver::OperationalCoordinator::Result{true, "driver recover detail"};
+    };
+    ops.shutdown_all = [](bool) {
+        return can_driver::OperationalCoordinator::Result{true, "driver shutdown detail"};
+    };
+    ops.motion_healthy = [](std::string *) {
+        return true;
+    };
+    ops.any_fault_active = []() {
+        return false;
+    };
+    ops.hold_commands = []() {};
+    ops.arm_fresh_command_latch = []() {};
+
+    auto &coordinator = hw.operationalCoordinator();
+    coordinator.SetDriverOps(std::move(ops));
+    coordinator.SetConfigured();
+
+    LifecycleServiceGateway gateway(pnh, &coordinator);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient initClient = nh.serviceClient<can_driver::Init>(pnh.resolveName("init"));
+    ros::ServiceClient enableClient =
+        nh.serviceClient<std_srvs::Trigger>(pnh.resolveName("enable"));
+    ros::ServiceClient disableClient =
+        nh.serviceClient<std_srvs::Trigger>(pnh.resolveName("disable"));
+    ros::ServiceClient recoverClient =
+        nh.serviceClient<can_driver::Recover>(pnh.resolveName("recover"));
+    ros::ServiceClient resumeClient =
+        nh.serviceClient<std_srvs::Trigger>(pnh.resolveName("resume"));
+    ros::ServiceClient haltClient =
+        nh.serviceClient<std_srvs::Trigger>(pnh.resolveName("halt"));
+    ros::ServiceClient shutdownClient =
+        nh.serviceClient<can_driver::Shutdown>(pnh.resolveName("shutdown"));
+
+    ASSERT_TRUE(initClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(enableClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(disableClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(recoverClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(resumeClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(haltClient.waitForExistence(ros::Duration(1.0)));
+    ASSERT_TRUE(shutdownClient.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::Init initSrv;
+    initSrv.request.device = "fake0";
+    initSrv.request.loopback = false;
+    ASSERT_TRUE(initClient.call(initSrv));
+    EXPECT_TRUE(initSrv.response.success);
+    EXPECT_EQ(initSrv.response.message, "initialized (armed)");
+
+    can_driver::Init initAgainSrv;
+    initAgainSrv.request.device = "fake0";
+    initAgainSrv.request.loopback = false;
+    ASSERT_TRUE(initClient.call(initAgainSrv));
+    EXPECT_TRUE(initAgainSrv.response.success);
+    EXPECT_EQ(initAgainSrv.response.message, "already initialized");
+
+    std_srvs::Trigger resumeSrv;
+    ASSERT_TRUE(resumeClient.call(resumeSrv));
+    EXPECT_TRUE(resumeSrv.response.success);
+    EXPECT_EQ(resumeSrv.response.message, "resumed");
+
+    std_srvs::Trigger resumeAgainSrv;
+    ASSERT_TRUE(resumeClient.call(resumeAgainSrv));
+    EXPECT_TRUE(resumeAgainSrv.response.success);
+    EXPECT_EQ(resumeAgainSrv.response.message, "already running");
+
+    std_srvs::Trigger haltSrv;
+    ASSERT_TRUE(haltClient.call(haltSrv));
+    EXPECT_TRUE(haltSrv.response.success);
+    EXPECT_EQ(haltSrv.response.message, "halted");
+
+    std_srvs::Trigger haltAgainSrv;
+    ASSERT_TRUE(haltClient.call(haltAgainSrv));
+    EXPECT_TRUE(haltAgainSrv.response.success);
+    EXPECT_EQ(haltAgainSrv.response.message, "already halted");
+
+    std_srvs::Trigger disableSrv;
+    ASSERT_TRUE(disableClient.call(disableSrv));
+    EXPECT_TRUE(disableSrv.response.success);
+    EXPECT_EQ(disableSrv.response.message, "disabled (standby)");
+
+    std_srvs::Trigger enableSrv;
+    ASSERT_TRUE(enableClient.call(enableSrv));
+    EXPECT_TRUE(enableSrv.response.success);
+    EXPECT_EQ(enableSrv.response.message, "enabled (armed)");
+
+    std_srvs::Trigger enableAgainSrv;
+    ASSERT_TRUE(enableClient.call(enableAgainSrv));
+    EXPECT_TRUE(enableAgainSrv.response.success);
+    EXPECT_EQ(enableAgainSrv.response.message, "already enabled");
+
+    coordinator.SetFaulted();
+
+    can_driver::Recover recoverSrv;
+    recoverSrv.request.motor_id = 0xFFFFu;
+    ASSERT_TRUE(recoverClient.call(recoverSrv));
+    EXPECT_TRUE(recoverSrv.response.success);
+    EXPECT_EQ(recoverSrv.response.message, "recovered (standby)");
+
+    can_driver::Shutdown shutdownSrv;
+    shutdownSrv.request.force = false;
+    ASSERT_TRUE(shutdownClient.call(shutdownSrv));
+    EXPECT_TRUE(shutdownSrv.response.success);
+    EXPECT_EQ(shutdownSrv.response.message, "communication stopped; call ~/init first");
 
     spinner.stop();
 }

@@ -252,10 +252,6 @@ OperationalCoordinator::Result OperationalCoordinator::RequestHalt()
 
 OperationalCoordinator::Result OperationalCoordinator::RequestRecover()
 {
-    if (mode() != SystemOpMode::Faulted &&
-        driverOps_.any_fault_active && driverOps_.any_fault_active()) {
-        SetFaulted();
-    }
     return DoTransition(
         {SystemOpMode::Faulted},
         SystemOpMode::Standby,

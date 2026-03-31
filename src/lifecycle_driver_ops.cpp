@@ -106,7 +106,7 @@ LifecycleDriverOps::Result LifecycleDriverOps::runMotorBatchAction(
                                             rejectedMessage,
                                             protocolUnavailableMessage);
     }
-    return {true, "OK"};
+    return {true, ""};
 }
 
 std::shared_ptr<CanProtocol> LifecycleDriverOps::getProtocol(const std::string &device,
@@ -338,7 +338,7 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
             }
         }
         if (allHealthy) {
-            return {true, "Recovered (standby)."};
+            return {true, ""};
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
@@ -354,7 +354,7 @@ LifecycleDriverOps::Result LifecycleDriverOps::shutdownAll(bool force) const
     }
 
     deviceManager_->shutdownAll();
-    return {true, "All CAN devices shut down."};
+    return {true, ""};
 }
 
 bool LifecycleDriverOps::anyFaultActive() const

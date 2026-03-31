@@ -97,4 +97,22 @@ TEST(OperationalCoordinatorTest, RecoverFailureKeepsFaulted)
     EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Faulted);
 }
 
+TEST(OperationalCoordinatorTest, RecoverDoesNotImplicitlyEnterFaultedFromArmed)
+{
+    auto ops = makeHappyOps();
+    ops.any_fault_active = []() {
+        return true;
+    };
+
+    can_driver::OperationalCoordinator coordinator(ops);
+    coordinator.SetConfigured();
+    ASSERT_TRUE(coordinator.RequestInit("fake0", false).ok);
+    ASSERT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    const auto result = coordinator.RequestRecover();
+    EXPECT_FALSE(result.ok);
+    EXPECT_EQ(result.message, "cannot transition from Armed to Standby");
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+}
+
 } // namespace

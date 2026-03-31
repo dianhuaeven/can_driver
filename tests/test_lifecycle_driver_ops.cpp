@@ -435,7 +435,7 @@ TEST(LifecycleDriverOpsTest, RecoverAllResetsFaultsBeforeReturningSuccess)
 
     const auto result = ops.recoverAll();
     EXPECT_TRUE(result.ok);
-    EXPECT_EQ(result.message, "Recovered (standby).");
+    EXPECT_TRUE(result.message.empty());
     EXPECT_EQ(deviceManager->protocol()->resetFaultCalls(0x141), 1);
     EXPECT_EQ(deviceManager->protocol()->resetFaultCalls(0x142), 1);
     EXPECT_FALSE(ops.anyFaultActive());
@@ -673,7 +673,7 @@ TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisRuntimeRecoveryConfirmation)
     feedbackThread.join();
 
     EXPECT_TRUE(result.ok);
-    EXPECT_EQ(result.message, "Recovered (standby).");
+    EXPECT_TRUE(result.message.empty());
 }
 
 } // namespace
