@@ -101,6 +101,35 @@ void DeviceManager::resetDeviceRuntimeLocked(const std::string &device)
     txDispatchers_.erase(device);
 }
 
+void DeviceManager::shutdownDeviceLocked(const std::string &device)
+{
+    const auto transportIt = transports_.find(device);
+    const auto transport =
+        (transportIt != transports_.end()) ? transportIt->second : std::shared_ptr<SocketCanController>();
+
+    if (sharedState_) {
+        const auto stats = transport ? transport->snapshotStats() : SocketCanController::Stats {};
+        sharedState_->mutateDeviceHealth(
+            device,
+            [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = false;
+                health->txBackpressure = stats.txBackpressure;
+                health->txLinkUnavailable = stats.txLinkUnavailable;
+                health->txError = stats.txError;
+                health->rxError = stats.rxError;
+                health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
+                health->lastRxSteadyNs = stats.lastRxSteadyNs;
+            });
+    }
+
+    resetDeviceRuntimeLocked(device);
+    if (transport) {
+        transport->shutdown();
+    }
+    transports_.erase(device);
+    deviceCmdMutexes_.erase(device);
+}
+
 // 幂等创建 transport：同一 device 只创建一次。
 bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
 {
@@ -196,6 +225,7 @@ bool DeviceManager::initDevice(const std::string &device,
         transport->shutdown();
         if (!transport->initialize(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Re-init of '%s' failed.", device.c_str());
+            shutdownDeviceLocked(device);
             return false;
         }
     }
@@ -327,33 +357,28 @@ void DeviceManager::setPpFastWriteEnabled(bool enabled)
 void DeviceManager::shutdownAll()
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    if (sharedState_) {
-        for (const auto &kv : transports_) {
-            const auto stats =
-                kv.second ? kv.second->snapshotStats() : SocketCanController::Stats {};
-            sharedState_->mutateDeviceHealth(
-                kv.first,
-                [&stats](can_driver::SharedDriverState::DeviceHealthState *health) {
-                    health->transportReady = false;
-                    health->txBackpressure = stats.txBackpressure;
-                    health->txLinkUnavailable = stats.txLinkUnavailable;
-                    health->txError = stats.txError;
-                    health->rxError = stats.rxError;
-                    health->lastTxLinkUnavailableSteadyNs = stats.lastTxLinkUnavailableSteadyNs;
-                    health->lastRxSteadyNs = stats.lastRxSteadyNs;
-                });
-        }
+    std::vector<std::string> devices;
+    devices.reserve(transports_.size());
+    for (const auto &kv : transports_) {
+        devices.push_back(kv.first);
     }
+
+    for (const auto &device : devices) {
+        shutdownDeviceLocked(device);
+    }
+
     stopAllRefreshWorkersLocked();
-    // 先释放协议（包含内部线程/handler），再关闭 transport。
     mtProtocols_.clear();
     eyouProtocols_.clear();
     txDispatchers_.clear();
-    for (auto &kv : transports_) {
-        kv.second->shutdown();
-    }
     transports_.clear();
     deviceCmdMutexes_.clear();
+}
+
+void DeviceManager::shutdownDevice(const std::string &device)
+{
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    shutdownDeviceLocked(device);
 }
 
 std::shared_ptr<CanProtocol> DeviceManager::getProtocol(const std::string &device, CanType type) const

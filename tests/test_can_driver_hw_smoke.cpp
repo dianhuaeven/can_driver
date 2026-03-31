@@ -30,7 +30,7 @@ public:
         lastModeMotor_ = motorId;
         lastMode_ = mode;
         ++setModeCalls_;
-        return true;
+        return setModeResult_;
     }
 
     bool setVelocity(MotorID motorId, int32_t velocity) override
@@ -196,6 +196,12 @@ public:
         hasFault_ = value;
     }
 
+    void setModeResult(bool value)
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        setModeResult_ = value;
+    }
+
     void setFeedbackPosition(int64_t value)
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -225,6 +231,7 @@ private:
     MotorID lastModeMotor_{MotorID::LeftWheel};
     MotorMode lastMode_{MotorMode::Position};
     int setModeCalls_{0};
+    bool setModeResult_{true};
 
     MotorID lastVelocityMotor_{MotorID::LeftWheel};
     int32_t lastVelocity_{0};
@@ -271,6 +278,12 @@ public:
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
     void setRefreshRateHz(double) override {}
     void setPpFastWriteEnabled(bool) override {}
+    void shutdownDevice(const std::string &device) override
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        ++shutdownDeviceCalls_;
+        lastShutdownDevice_ = device;
+    }
     void shutdownAll() override {}
 
     std::shared_ptr<CanProtocol> getProtocol(const std::string &, CanType) const override
@@ -302,13 +315,28 @@ public:
         ready_ = ready;
     }
 
+    int shutdownDeviceCalls() const
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        return shutdownDeviceCalls_;
+    }
+
+    std::string lastShutdownDevice() const
+    {
+        std::lock_guard<std::mutex> lock(shutdownMutex_);
+        return lastShutdownDevice_;
+    }
+
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
     std::shared_ptr<can_driver::SharedDriverState> sharedState_;
     bool exposeSharedState_{false};
     mutable std::mutex readyMutex_;
+    mutable std::mutex shutdownMutex_;
     bool ready_{true};
+    int shutdownDeviceCalls_{0};
+    std::string lastShutdownDevice_;
 };
 
 class CanDriverHWSmokeTest : public ::testing::Test {
@@ -775,6 +803,36 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_CSP);
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, InitFailureRollsBackPreparedDevice)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setModeResult(false);
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_init_rollback"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    auto &coordinator = hw.operationalCoordinator();
+    const auto failedInit = coordinator.RequestInit("fake0", false);
+    EXPECT_FALSE(failedInit.ok);
+    EXPECT_EQ(failedInit.message, "Failed to apply initial modes on fake0");
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Configured);
+    EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 1);
+    EXPECT_EQ(fakeDm->lastShutdownDevice(), "fake0");
+
+    fakeDm->protocol()->setModeResult(true);
+    const auto retriedInit = coordinator.RequestInit("fake0", false);
+    EXPECT_TRUE(retriedInit.ok) << retriedInit.message;
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+    EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 1);
 }
 
 TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)

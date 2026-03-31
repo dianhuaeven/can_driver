@@ -632,6 +632,18 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
     const std::string &device,
     bool loopback)
 {
+    const auto rollbackPreparedDevice =
+        [this, &device](const can_driver::OperationalCoordinator::Result &failure) {
+            const auto rollback = lifecycleDriverOps_.shutdownDevice(device);
+            if (!rollback.ok) {
+                ROS_ERROR("[CanDriverHW] Failed to roll back prepared device '%s' after init "
+                          "failure: %s",
+                          device.c_str(),
+                          rollback.message.c_str());
+            }
+            return failure;
+        };
+
     const auto prepareResult = lifecycleDriverOps_.prepareDevice(device, loopback);
     if (!prepareResult.ok) {
         return prepareResult;
@@ -640,15 +652,16 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
     deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     if (!syncStartupPositionAndCommands(device)) {
-        return {false, "Failed to synchronize startup position on " + device};
+        return rollbackPreparedDevice(
+            {false, "Failed to synchronize startup position on " + device});
     }
     if (!applyInitialModes(device)) {
-        return {false, "Failed to apply initial modes on " + device};
+        return rollbackPreparedDevice({false, "Failed to apply initial modes on " + device});
     }
 
     const auto enableResult = lifecycleDriverOps_.enableDevice(device);
     if (!enableResult.ok) {
-        return enableResult;
+        return rollbackPreparedDevice(enableResult);
     }
     active_.store(true, std::memory_order_release);
     stateTimer_.start();

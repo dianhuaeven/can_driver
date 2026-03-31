@@ -44,6 +44,8 @@ public:
     void setRefreshRateHz(double hz) override;
     /// 设置 PP 协议是否使用快写命令（CMD=0x05）。
     void setPpFastWriteEnabled(bool enabled) override;
+    /// 停止并释放单个设备资源，不影响其他 device。
+    void shutdownDevice(const std::string &device) override;
     /// 停止并释放所有设备资源。
     void shutdownAll() override;
 
@@ -64,6 +66,7 @@ private:
     void stopRefreshWorkerLocked(const std::string &device, CanType type);
     void stopAllRefreshWorkersLocked();
     void resetDeviceRuntimeLocked(const std::string &device);
+    void shutdownDeviceLocked(const std::string &device);
 
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;

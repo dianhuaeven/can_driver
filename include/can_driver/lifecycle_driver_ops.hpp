@@ -29,6 +29,7 @@ public:
     Result prepareDevice(const std::string &device, bool loopback) const;
     Result enableDevice(const std::string &device) const;
     Result initializeDevice(const std::string &device, bool loopback) const;
+    Result shutdownDevice(const std::string &device) const;
     Result enableAll() const;
     Result disableAll() const;
     Result haltAll() const;

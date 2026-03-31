@@ -175,6 +175,11 @@ public:
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
     void setRefreshRateHz(double) override {}
     void setPpFastWriteEnabled(bool) override {}
+    void shutdownDevice(const std::string &device) override
+    {
+        ++shutdownDeviceCalls_;
+        lastShutdownDevice_ = device;
+    }
     void shutdownAll() override { ++shutdownCalls_; }
 
     std::shared_ptr<CanProtocol> getProtocol(const std::string &, CanType) const override
@@ -207,6 +212,8 @@ public:
     const std::string &lastInitDevice() const { return lastInitDevice_; }
     const std::vector<std::pair<CanType, MotorID>> &lastInitMotors() const { return lastInitMotors_; }
     bool lastInitLoopback() const { return lastInitLoopback_; }
+    int shutdownDeviceCalls() const { return shutdownDeviceCalls_; }
+    const std::string &lastShutdownDevice() const { return lastShutdownDevice_; }
 
 private:
     std::shared_ptr<FakeProtocol> protocol_;
@@ -214,10 +221,12 @@ private:
     std::shared_ptr<can_driver::SharedDriverState> sharedState_;
     bool ready_{true};
     bool initResult_{true};
+    int shutdownDeviceCalls_{0};
     int shutdownCalls_{0};
     std::string lastInitDevice_;
     std::vector<std::pair<CanType, MotorID>> lastInitMotors_;
     bool lastInitLoopback_{false};
+    std::string lastShutdownDevice_;
 };
 
 std::vector<MotorActionExecutor::Target> makeTargets()
@@ -471,6 +480,19 @@ TEST(LifecycleDriverOpsTest, InitializeDeviceRollsBackPartialEnableFailure)
     EXPECT_EQ(deviceManager->protocol()->enableCalls(0x142), 1);
     EXPECT_EQ(deviceManager->protocol()->disableCalls(0x141), 1);
     EXPECT_FALSE(deviceManager->protocol()->isEnabled(static_cast<MotorID>(0x141)));
+}
+
+TEST(LifecycleDriverOpsTest, ShutdownDeviceDelegatesToDeviceManager)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+
+    const auto result = ops.shutdownDevice("fake1");
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(deviceManager->shutdownDeviceCalls(), 1);
+    EXPECT_EQ(deviceManager->lastShutdownDevice(), "fake1");
 }
 
 TEST(LifecycleDriverOpsTest, RecoverAllResetsFaultsBeforeReturningSuccess)

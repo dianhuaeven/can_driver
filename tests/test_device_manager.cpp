@@ -30,6 +30,11 @@ public:
         transport.lastTxLinkUnavailableSteadyNs_.store(lastTxLinkUnavailableSteadyNs);
         transport.lastRxSteadyNs_.store(lastRxSteadyNs);
     }
+
+    static bool hasTransport(const DeviceManager &dm, const std::string &device)
+    {
+        return dm.transports_.find(device) != dm.transports_.end();
+    }
 };
 
 namespace {
@@ -168,6 +173,43 @@ TEST_F(RosTimeFixture, ShutdownAllClearsDevices)
 
     EXPECT_EQ(dm.deviceCount(), 0u);
     EXPECT_EQ(dm.getTransport("vcan0"), nullptr);
+}
+
+TEST_F(RosTimeFixture, ShutdownDeviceOnlyClearsRequestedDevice)
+{
+    DeviceManager dm;
+    auto fake0 = std::make_shared<SocketCanController>();
+    auto fake1 = std::make_shared<SocketCanController>();
+
+    DeviceManagerTestAccessor::injectTransport(dm, "fake0", fake0);
+    DeviceManagerTestAccessor::injectTransport(dm, "fake1", fake1);
+
+    dm.getSharedDriverState()->mutateDeviceHealth(
+        "fake0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    dm.getSharedDriverState()->mutateDeviceHealth(
+        "fake1",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+
+    dm.shutdownDevice("fake0");
+
+    EXPECT_EQ(dm.getTransport("fake0"), nullptr);
+    EXPECT_EQ(dm.getDeviceMutex("fake0"), nullptr);
+    EXPECT_EQ(dm.deviceCount(), 1u);
+    EXPECT_TRUE(DeviceManagerTestAccessor::hasTransport(dm, "fake1"));
+    EXPECT_NE(dm.getTransport("fake1"), nullptr);
+    EXPECT_NE(dm.getDeviceMutex("fake1"), nullptr);
+
+    can_driver::SharedDriverState::DeviceHealthState fake0Health;
+    can_driver::SharedDriverState::DeviceHealthState fake1Health;
+    ASSERT_TRUE(dm.getSharedDriverState()->getDeviceHealth("fake0", &fake0Health));
+    ASSERT_TRUE(dm.getSharedDriverState()->getDeviceHealth("fake1", &fake1Health));
+    EXPECT_FALSE(fake0Health.transportReady);
+    EXPECT_TRUE(fake1Health.transportReady);
 }
 
 TEST_F(RosTimeFixture, InitDeviceRecreatesProtocolsAfterTransportReinit)

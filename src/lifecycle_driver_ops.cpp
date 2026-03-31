@@ -207,6 +207,16 @@ LifecycleDriverOps::Result LifecycleDriverOps::initializeDevice(const std::strin
     return {true, "initialized (armed)"};
 }
 
+LifecycleDriverOps::Result LifecycleDriverOps::shutdownDevice(const std::string &device) const
+{
+    if (!deviceManager_) {
+        return {false, "Device manager unavailable."};
+    }
+
+    deviceManager_->shutdownDevice(device);
+    return {true, ""};
+}
+
 LifecycleDriverOps::Result LifecycleDriverOps::prepareDevice(const std::string &device,
                                                              bool loopback) const
 {
