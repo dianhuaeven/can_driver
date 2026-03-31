@@ -92,25 +92,6 @@ protected:
 
 class EyouCanTestAccessor {
 public:
-    static void setRefreshState(EyouCan &eyou, const std::vector<uint8_t> &motorIds, bool active)
-    {
-        (void)active;
-        std::lock_guard<std::mutex> lock(eyou.refreshMutex);
-        eyou.refreshMotorIds = motorIds;
-        eyou.managedMotorIds.clear();
-        for (const auto motorId : motorIds) {
-            eyou.managedMotorIds.insert(motorId);
-        }
-        eyou.refreshCycleCount_ = 0;
-        std::lock_guard<std::mutex> pendingLock(eyou.pendingReadMutex_);
-        eyou.pendingReadRequests_.clear();
-    }
-
-    static void refresh(EyouCan &eyou, bool queryPressureActive = false)
-    {
-        eyou.refreshMotorStates(queryPressureActive);
-    }
-
     static void ageAllPendingRequests(EyouCan &eyou, std::chrono::milliseconds age)
     {
         const auto now = std::chrono::steady_clock::now();
@@ -127,17 +108,6 @@ public:
         for (auto &entry : eyou.pendingReadRequests_) {
             entry.second.nextEligibleSend = std::chrono::steady_clock::time_point {};
         }
-    }
-
-    static void clearPendingRequests(EyouCan &eyou)
-    {
-        std::lock_guard<std::mutex> lock(eyou.pendingReadMutex_);
-        eyou.pendingReadRequests_.clear();
-    }
-
-    static void setRefreshCycleCount(EyouCan &eyou, std::uint64_t value)
-    {
-        eyou.refreshCycleCount_ = value;
     }
 
     static std::size_t consecutiveTimeouts(EyouCan &eyou, uint8_t motorId, uint8_t subCommand)
@@ -256,15 +226,29 @@ TEST_F(EyouCanTest, SetModeUpdatesDesiredModeWithoutPretendingMotionCommandExist
     EXPECT_EQ(command.lastCommandSteadyNs, 0);
 }
 
-TEST_F(EyouCanTest, RefreshQueriesRouteThroughUnifiedTxDispatcher)
+TEST_F(EyouCanTest, IssueRefreshQueryMapsEnumsToExpectedSubcommands)
 {
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
 
-    EyouCanTestAccessor::refresh(eyou);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Position);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Velocity);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Mode);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Enable);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Fault);
+    eyou.issueRefreshQuery(kMotorId, EyouCan::RefreshQuery::Current);
 
-    ASSERT_FALSE(txDispatcher->requests.empty());
-    EXPECT_EQ(txDispatcher->requests.front().category, CanTxDispatcher::Category::Query);
-    EXPECT_STREQ(txDispatcher->requests.front().source, "EyouCan::sendReadCommand");
+    ASSERT_EQ(txDispatcher->requests.size(), 6u);
+    ASSERT_EQ(transport->sentFrames.size(), 6u);
+    for (const auto &request : txDispatcher->requests) {
+        EXPECT_EQ(request.category, CanTxDispatcher::Category::Query);
+        EXPECT_STREQ(request.source, "EyouCan::sendReadCommand");
+    }
+    EXPECT_EQ(transport->sentFrames[0].data[1], 0x07u);
+    EXPECT_EQ(transport->sentFrames[1].data[1], 0x06u);
+    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);
+    EXPECT_EQ(transport->sentFrames[3].data[1], 0x10u);
+    EXPECT_EQ(transport->sentFrames[4].data[1], 0x15u);
+    EXPECT_EQ(transport->sentFrames[5].data[1], 0x05u);
 }
 
 TEST_F(EyouCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
@@ -277,32 +261,28 @@ TEST_F(EyouCanTest, GetPositionWithoutCacheReturnsZeroWithoutSendingReadRequest)
     EXPECT_TRUE(transport->sentFrames.empty());
 }
 
-TEST_F(EyouCanTest, RefreshDoesNotResendSameReadWhileRequestIsInFlight)
+TEST_F(EyouCanTest, IssueRefreshQueryDoesNotResendSameReadWhileRequestIsInFlight)
 {
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
 
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 6u);
-
-    EyouCanTestAccessor::refresh(eyou);
-    EXPECT_EQ(transport->sentFrames.size(), 6u);
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
 }
 
-TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
+TEST_F(EyouCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
 {
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
-
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 6u);
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    ASSERT_EQ(transport->sentFrames.size(), 1u);
 
     EyouCanTestAccessor::ageAllPendingRequests(eyou, std::chrono::milliseconds(25));
-    EyouCanTestAccessor::refresh(eyou);
-    EXPECT_EQ(transport->sentFrames.size(), 6u);
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    EXPECT_EQ(transport->sentFrames.size(), 1u);
     EXPECT_EQ(EyouCanTestAccessor::consecutiveTimeouts(eyou, 0x05, 0x07), 1u);
 
     EyouCanTestAccessor::expireAllPendingBackoff(eyou);
-    EyouCanTestAccessor::refresh(eyou);
-    EXPECT_EQ(transport->sentFrames.size(), 11u);
+    eyou.issueRefreshQuery(static_cast<MotorID>(0x05), EyouCan::RefreshQuery::Position);
+    EXPECT_EQ(transport->sentFrames.size(), 2u);
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     ASSERT_TRUE(
@@ -310,135 +290,6 @@ TEST_F(EyouCanTest, RefreshBacksOffAfterRepeatedReadTimeouts)
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);
-}
-
-TEST_F(EyouCanTest, SteadyRefreshRotatesLifecycleQueriesWithoutWaitingForLegacySlowDivider)
-{
-    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
-    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
-
-    sharedState->mutateAxisFeedback(
-        axisKey,
-        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
-            feedback->feedbackSeen = true;
-            feedback->enabled = true;
-            feedback->mode = CanProtocol::MotorMode::Position;
-            feedback->lastRxSteadyNs = nowNs;
-        });
-    sharedState->mutateAxisCommand(
-        axisKey,
-        [](can_driver::SharedDriverState::AxisCommandState *command) {
-            command->desiredMode = CanProtocol::MotorMode::Position;
-            command->desiredModeValid = true;
-            command->valid = true;
-        });
-    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
-
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
-
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 3u);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x0Fu);
-
-    transport->clearSent();
-    EyouCanTestAccessor::clearPendingRequests(eyou);
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 3u);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x10u);
-
-    transport->clearSent();
-    EyouCanTestAccessor::clearPendingRequests(eyou);
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 3u);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x15u);
-
-    transport->clearSent();
-    EyouCanTestAccessor::clearPendingRequests(eyou);
-    EyouCanTestAccessor::refresh(eyou);
-    ASSERT_EQ(transport->sentFrames.size(), 3u);
-    EXPECT_EQ(transport->sentFrames[2].data[1], 0x05u);
-}
-
-TEST_F(EyouCanTest, BackpressurePrefersCriticalLifecycleQueriesOverCurrentSampling)
-{
-    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
-    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
-
-    sharedState->mutateAxisFeedback(
-        axisKey,
-        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
-            feedback->feedbackSeen = true;
-            feedback->enabled = true;
-            feedback->mode = CanProtocol::MotorMode::Position;
-            feedback->lastRxSteadyNs = nowNs;
-        });
-    sharedState->mutateAxisCommand(
-        axisKey,
-        [](can_driver::SharedDriverState::AxisCommandState *command) {
-            command->desiredMode = CanProtocol::MotorMode::Position;
-            command->desiredModeValid = true;
-            command->valid = true;
-        });
-    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
-    sharedState->mutateDeviceHealth(
-        "can0",
-        [](can_driver::SharedDriverState::DeviceHealthState *health) {
-            health->transportReady = true;
-            health->txBackpressure = 1;
-        });
-
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
-    EyouCanTestAccessor::setRefreshCycleCount(eyou, 3);
-
-    EyouCanTestAccessor::refresh(eyou, true);
-    ASSERT_EQ(transport->sentFrames.size(), 2u);
-    EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
-    EXPECT_EQ(transport->sentFrames[1].data[1], 0x0Fu);
-}
-
-TEST_F(EyouCanTest, BackpressureAlternatesFastFeedbackQueriesAcrossCycles)
-{
-    constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
-    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
-
-    sharedState->mutateAxisFeedback(
-        axisKey,
-        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
-            feedback->feedbackSeen = true;
-            feedback->enabled = true;
-            feedback->mode = CanProtocol::MotorMode::Position;
-            feedback->lastRxSteadyNs = nowNs;
-        });
-    sharedState->mutateAxisCommand(
-        axisKey,
-        [](can_driver::SharedDriverState::AxisCommandState *command) {
-            command->desiredMode = CanProtocol::MotorMode::Position;
-            command->desiredModeValid = true;
-            command->valid = true;
-        });
-    sharedState->setAxisIntent(axisKey, can_driver::AxisIntent::Run);
-    sharedState->mutateDeviceHealth(
-        "can0",
-        [](can_driver::SharedDriverState::DeviceHealthState *health) {
-            health->transportReady = true;
-            health->txBackpressure = 1;
-        });
-
-    EyouCanTestAccessor::setRefreshState(eyou, {0x05}, true);
-    EyouCanTestAccessor::setRefreshCycleCount(eyou, 0);
-
-    EyouCanTestAccessor::refresh(eyou, true);
-    ASSERT_EQ(transport->sentFrames.size(), 2u);
-    EXPECT_EQ(transport->sentFrames[0].data[1], 0x07u);
-
-    transport->clearSent();
-    EyouCanTestAccessor::clearPendingRequests(eyou);
-    EyouCanTestAccessor::refresh(eyou, true);
-    ASSERT_EQ(transport->sentFrames.size(), 2u);
-    EXPECT_EQ(transport->sentFrames[0].data[1], 0x06u);
 }
 
 TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)

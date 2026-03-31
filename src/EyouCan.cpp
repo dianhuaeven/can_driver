@@ -20,18 +20,7 @@ constexpr uint8_t kReadCommand = 0x03;
 constexpr uint8_t kWriteAck = 0x02;
 constexpr uint8_t kReadResponse = 0x04;
 constexpr uint16_t kEyouIdFrameBase = 0x0000;
-constexpr std::size_t kQueriesPerMotorPerCycle = 5;
-
-struct AxisRefreshSnapshot {
-    bool feedbackSeen{false};
-    bool enabled{false};
-    bool fault{false};
-    bool degraded{false};
-    bool desiredModeValid{false};
-    CanProtocol::MotorMode feedbackMode{CanProtocol::MotorMode::Position};
-    CanProtocol::MotorMode desiredMode{CanProtocol::MotorMode::Position};
-    can_driver::AxisIntent intent{can_driver::AxisIntent::None};
-};
+constexpr std::size_t kQueriesPerMotorPerCycle = 6;
 
 uint32_t readUInt32BE(const CanTransport::Frame &frame, std::size_t index)
 {
@@ -75,50 +64,6 @@ int16_t clampInt32ToInt16WithWarn(int32_t value, uint8_t motorId, const char *fi
     return static_cast<int16_t>(clamped);
 }
 
-AxisRefreshSnapshot makeAxisRefreshSnapshot(
-    const std::shared_ptr<can_driver::SharedDriverState> &sharedState,
-    const std::string &deviceName,
-    const can_driver::SharedDriverState::AxisKey &axisKey)
-{
-    AxisRefreshSnapshot snapshot;
-    if (!sharedState || deviceName.empty()) {
-        return snapshot;
-    }
-
-    can_driver::SharedDriverState::AxisFeedbackState feedback;
-    if (sharedState->getAxisFeedback(axisKey, &feedback)) {
-        snapshot.feedbackSeen = feedback.feedbackSeen;
-        snapshot.enabled = feedback.enabled;
-        snapshot.fault = feedback.fault;
-        snapshot.degraded = feedback.degraded || feedback.consecutiveTimeoutCount > 0;
-        snapshot.feedbackMode = feedback.mode;
-    }
-
-    can_driver::SharedDriverState::AxisCommandState command;
-    if (sharedState->getAxisCommand(axisKey, &command)) {
-        snapshot.desiredModeValid = command.desiredModeValid;
-        snapshot.desiredMode = command.desiredMode;
-    }
-
-    snapshot.intent = sharedState->getAxisIntent(axisKey);
-
-    return snapshot;
-}
-
-bool needsPriorityLifecycleQueries(const AxisRefreshSnapshot &snapshot)
-{
-    if (!snapshot.feedbackSeen || snapshot.degraded || snapshot.fault || !snapshot.enabled) {
-        return true;
-    }
-    if (snapshot.intent == can_driver::AxisIntent::Enable ||
-        snapshot.intent == can_driver::AxisIntent::Recover) {
-        return true;
-    }
-    if (snapshot.desiredModeValid && snapshot.feedbackMode != snapshot.desiredMode) {
-        return true;
-    }
-    return false;
-}
 } // namespace
 
 std::chrono::milliseconds EyouCan::computeRefreshSleep(std::size_t motorCount) const
@@ -179,7 +124,6 @@ void EyouCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
         }
     }
     resetReadTracking();
-    refreshCycleCount_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -193,11 +137,6 @@ void EyouCan::setRefreshRateHz(double hz)
         return;
     }
     refreshRateHz_.store(hz, std::memory_order_relaxed);
-}
-
-void EyouCan::runRefreshCycle(bool queryPressureActive)
-{
-    refreshMotorStates(queryPressureActive);
 }
 
 std::chrono::milliseconds EyouCan::refreshSleepInterval() const
@@ -224,6 +163,31 @@ uint64_t EyouCan::fastWriteSentCount() const
 uint64_t EyouCan::normalWriteSentCount() const
 {
     return normalWriteSentCount_.load(std::memory_order_relaxed);
+}
+
+void EyouCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
+{
+    const uint8_t id = static_cast<uint8_t>(motorId);
+    switch (query) {
+    case RefreshQuery::Position:
+        requestPosition(id);
+        break;
+    case RefreshQuery::Velocity:
+        requestVelocity(id);
+        break;
+    case RefreshQuery::Mode:
+        requestMode(id);
+        break;
+    case RefreshQuery::Enable:
+        requestEnable(id);
+        break;
+    case RefreshQuery::Fault:
+        requestFault(id);
+        break;
+    case RefreshQuery::Current:
+        requestCurrent(id);
+        break;
+    }
 }
 
 bool EyouCan::setMode(MotorID Id, MotorMode mode)
@@ -989,86 +953,7 @@ void EyouCan::requestVelocity(uint8_t motorId)
     (void)tryIssueReadCommand(motorId, 0x06);
 }
 
-void EyouCan::refreshMotorStates(bool queryPressureActive)
-{
-    std::vector<uint8_t> motorIds;
-    {
-        std::lock_guard<std::mutex> lock(refreshMutex);
-        motorIds = refreshMotorIds;
-    }
-
-    if (!canController) {
-        return;
-    }
-
-    const std::uint64_t cycle = refreshCycleCount_++;
-
-    for (std::size_t motorIndex = 0; motorIndex < motorIds.size(); ++motorIndex) {
-        const uint8_t motorId = motorIds[motorIndex];
-        const auto axisKey = makeAxisKey(motorId);
-        const auto snapshot = makeAxisRefreshSnapshot(sharedState_, deviceName_, axisKey);
-        const bool priorityLifecycleQueries = needsPriorityLifecycleQueries(snapshot);
-        const std::size_t pressureFeedbackPhase =
-            static_cast<std::size_t>((cycle + motorIndex) % 2);
-
-        if (queryPressureActive) {
-            if (pressureFeedbackPhase == 0) {
-                requestPosition(motorId);
-            } else {
-                requestVelocity(motorId);
-            }
-
-            switch (static_cast<std::size_t>((cycle + motorIndex) % 3)) {
-            case 0:
-                requestMode(motorId);
-                break;
-            case 1:
-                requestEnable(motorId);
-                break;
-            case 2:
-            default:
-                requestFault(motorId);
-                break;
-            }
-            continue;
-        }
-
-        // 位置 + 速度：正常压力下每周期都查（控制闭环需要）
-        requestPosition(motorId);
-        requestVelocity(motorId);
-
-        if (priorityLifecycleQueries) {
-            requestMode(motorId);
-            requestEnable(motorId);
-            requestFault(motorId);
-            if (((cycle + motorIndex) % kPriorityCurrentDivider) == 0) {
-                requestCurrent(motorId);
-            }
-            continue;
-        }
-
-        const std::size_t criticalPhase = static_cast<std::size_t>((cycle + motorIndex) % 3);
-        const std::size_t steadyPhase = static_cast<std::size_t>((cycle + motorIndex) % 4);
-        switch (steadyPhase) {
-        case 0:
-            requestMode(motorId);
-            break;
-        case 1:
-            requestEnable(motorId);
-            break;
-        case 2:
-            requestFault(motorId);
-            break;
-        case 3:
-        default:
-            requestCurrent(motorId);
-            break;
-        }
-    }
-}
-
 void EyouCan::stopRefreshLoop()
 {
-    refreshCycleCount_ = 0;
     resetReadTracking();
 }

@@ -2,6 +2,7 @@
 #define MTCAN_H
 #include "CanProtocol.h"
 #include "can_driver/CanTransport.h"
+#include "can_driver/RefreshScheduler.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/CanTxDispatcher.h"
 #include <array>
@@ -126,10 +127,10 @@ public:
 
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
-    /// 执行一轮状态查询，由外部 refresh runtime 决定是否进入背压降载窗口。
-    void runRefreshCycle(bool queryPressureActive = false);
     /// 返回当前注册电机的建议查询周期。
     std::chrono::milliseconds refreshSleepInterval() const;
+    using RefreshQuery = can_driver::MtRefreshQuery;
+    void issueRefreshQuery(MotorID motorId, RefreshQuery query);
 
 private:
     struct MotorState {
@@ -165,8 +166,6 @@ private:
     std::atomic<double> refreshRateHz_{0.0};
     mutable std::mutex pendingReadMutex_;
     std::unordered_map<uint16_t, PendingReadRequest> pendingReadRequests_;
-    /// refresh 轮询周期计数，用于背压期分相查询。
-    uint64_t refreshCycleCount_{0};
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -196,7 +195,6 @@ private:
      * @brief 设置零点（0x64）
      */
     void setZeroPosition(uint8_t motorId) const;
-    void refreshMotorStates(bool queryPressureActive);
     void stopRefreshLoop();
     /**
      * @brief 通用加减速写入（0x43）

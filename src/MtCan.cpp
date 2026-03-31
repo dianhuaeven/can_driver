@@ -110,7 +110,6 @@ void MtCan::initializeMotorRefresh(const std::vector<MotorID> &motorIds)
         }
     }
     resetReadTracking();
-    refreshCycleCount_ = 0;
 
     if (motorIds.empty()) {
         stopRefreshLoop();
@@ -129,11 +128,6 @@ void MtCan::setRefreshRateHz(double hz)
         return;
     }
     refreshRateHz_.store(hz, std::memory_order_relaxed);
-}
-
-void MtCan::runRefreshCycle(bool queryPressureActive)
-{
-    refreshMotorStates(queryPressureActive);
 }
 
 std::chrono::milliseconds MtCan::refreshSleepInterval() const
@@ -155,6 +149,22 @@ bool MtCan::setMode(MotorID Id, MotorMode mode)
     }
     syncSharedModeSelection(motorId, mode);
     return true;
+}
+
+void MtCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
+{
+    const uint8_t id = static_cast<uint8_t>(motorId);
+    switch (query) {
+    case RefreshQuery::State:
+        requestState(id);
+        break;
+    case RefreshQuery::MultiTurnAngle:
+        requestMultiTurnAngle(id);
+        break;
+    case RefreshQuery::Error:
+        requestError(id);
+        break;
+    }
 }
 
 bool MtCan::setVelocity(MotorID Id, int32_t velocity)
@@ -582,39 +592,6 @@ void MtCan::setZeroPosition(uint8_t motorId) const
 {
     const uint16_t canId = encodeSendCanId(motorId);
     sendFrame(canId, 0x64, {0, 0, 0, 0});
-}
-
-// [FIX #5] 增加多圈角度轮询
-void MtCan::refreshMotorStates(bool queryPressureActive)
-{
-    std::vector<uint8_t> motorIds;
-    {
-        std::lock_guard<std::mutex> lock(refreshMutex);
-        motorIds = refreshMotorIds;
-    }
-
-    if (!canController) {
-        return;
-    }
-
-    const std::uint64_t cycle = refreshCycleCount_++;
-
-    for (std::size_t motorIndex = 0; motorIndex < motorIds.size(); ++motorIndex) {
-        const uint8_t motorId = motorIds[motorIndex];
-        if (queryPressureActive) {
-            if (((cycle + motorIndex) % 2) == 0) {
-                requestState(motorId);          // 0x9C: 温度、电流、速度、编码器
-            } else {
-                requestMultiTurnAngle(motorId); // 0x92: 多圈角度（实际位置）
-            }
-            requestError(motorId);              // 0x9A: 错误标志
-            continue;
-        }
-
-        requestState(motorId);            // 0x9C: 温度、电流、速度、编码器
-        requestMultiTurnAngle(motorId);   // 0x92: 多圈角度（实际位置）
-        requestError(motorId);            // 0x9A: 错误标志
-    }
 }
 
 void MtCan::stopRefreshLoop()

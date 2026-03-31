@@ -2,6 +2,7 @@
 #define EyouCan_H
 #include "CanProtocol.h"
 #include "can_driver/CanTransport.h"
+#include "can_driver/RefreshScheduler.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/CanTxDispatcher.h"
 #include <atomic>
@@ -106,14 +107,14 @@ public:
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     /// 设置状态轮询频率（Hz）；<=0 表示使用默认自适应周期。
     void setRefreshRateHz(double hz);
-    /// 执行一轮状态查询，由外部 refresh runtime 决定是否进入背压降载窗口。
-    void runRefreshCycle(bool queryPressureActive = false);
     /// 返回当前注册电机的建议查询周期。
     std::chrono::milliseconds refreshSleepInterval() const;
     /// 设置是否启用 PP 快写命令（CMD=0x05）。
     void setFastWriteEnabled(bool enabled);
     uint64_t fastWriteSentCount() const;
     uint64_t normalWriteSentCount() const;
+    using RefreshQuery = can_driver::PpRefreshQuery;
+    void issueRefreshQuery(MotorID motorId, RefreshQuery query);
 
 private:
     /**
@@ -182,7 +183,6 @@ private:
     void requestVelocity(uint8_t motorId);
     bool isManagedMotorId(uint8_t motorId) const;
     void registerManagedMotorId(uint8_t motorId) const;
-    void refreshMotorStates(bool queryPressureActive);
     std::chrono::milliseconds computeRefreshSleep(std::size_t motorCount) const;
     std::chrono::milliseconds computeReadRequestTimeout() const;
     void stopRefreshLoop();
@@ -207,10 +207,6 @@ private:
     static std::chrono::milliseconds computeTimeoutBackoff(std::size_t consecutiveTimeouts,
                                                            std::chrono::milliseconds baseTimeout);
 
-    /// refresh 轮询周期计数，用于 slow 项分频
-    uint64_t refreshCycleCount_{0};
-    /// 高优先级状态下电流查询的分频。
-    static constexpr uint64_t kPriorityCurrentDivider = 4;
 };
 
 #endif // EyouCan_H

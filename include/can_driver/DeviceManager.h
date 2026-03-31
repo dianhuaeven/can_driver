@@ -72,7 +72,11 @@ private:
         std::shared_ptr<can_driver::DeviceRefreshWorker> worker;
         std::atomic<bool> mtActive{false};
         std::atomic<bool> ppActive{false};
+        std::vector<std::uint8_t> mtMotorIds;
+        std::vector<std::uint8_t> ppMotorIds;
         std::uint64_t refreshCycleCount{0};
+        std::uint64_t mtScheduleCycleCount{0};
+        std::uint64_t ppScheduleCycleCount{0};
         std::uint64_t lastObservedTxBackpressure{0};
         std::uint64_t queryPressureUntilCycle{0};
         std::chrono::steady_clock::time_point nextMtTick {};

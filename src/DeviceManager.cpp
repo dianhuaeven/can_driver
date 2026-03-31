@@ -1,5 +1,6 @@
 #include "can_driver/DeviceManager.h"
 #include "can_driver/DeviceRuntime.h"
+#include "can_driver/RefreshScheduler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -16,6 +17,49 @@ std::chrono::milliseconds clampRefreshSleep(std::chrono::milliseconds sleepFor)
         return std::chrono::milliseconds(1);
     }
     return sleepFor;
+}
+
+std::vector<std::uint8_t> normalizeMotorIds(const std::vector<MotorID> &motorIds)
+{
+    std::vector<std::uint8_t> normalized;
+    normalized.reserve(motorIds.size());
+    for (const auto motorId : motorIds) {
+        normalized.push_back(static_cast<std::uint8_t>(
+            can_driver::NormalizeProtocolMotorId(motorId)));
+    }
+    return normalized;
+}
+
+can_driver::PpAxisRefreshSnapshot buildPpAxisRefreshSnapshot(
+    const std::shared_ptr<can_driver::SharedDriverState> &sharedState,
+    const std::string &deviceName,
+    std::uint8_t motorId)
+{
+    can_driver::PpAxisRefreshSnapshot snapshot;
+    if (!sharedState) {
+        return snapshot;
+    }
+
+    const auto axisKey =
+        can_driver::MakeAxisKey(deviceName, CanType::PP, static_cast<MotorID>(motorId));
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+        snapshot.feedbackSeen = feedback.feedbackSeen;
+        snapshot.enabled = feedback.enabled;
+        snapshot.fault = feedback.fault;
+        snapshot.degraded = feedback.degraded;
+        snapshot.feedbackMode = feedback.mode;
+    }
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    if (sharedState->getAxisCommand(axisKey, &command)) {
+        snapshot.desiredModeValid = command.desiredModeValid;
+        snapshot.desiredMode = command.desiredMode;
+    }
+
+    snapshot.intent = sharedState->getAxisIntent(axisKey);
+    return snapshot;
 }
 
 } // namespace
@@ -68,13 +112,26 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
             if (runtime->mtActive.load(std::memory_order_acquire)) {
                 const auto protocol = runtime->mtProtocol.lock();
                 bool due = false;
+                std::uint64_t cycle = 0;
+                std::vector<std::uint8_t> motorIds;
                 {
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     due = (runtime->nextMtTick == std::chrono::steady_clock::time_point {}) ||
                           (now >= runtime->nextMtTick);
+                    if (due) {
+                        cycle = runtime->mtScheduleCycleCount++;
+                        motorIds = runtime->mtMotorIds;
+                    }
                 }
                 if (protocol && due) {
-                    protocol->runRefreshCycle(queryPressureActive);
+                    for (std::size_t i = 0; i < motorIds.size(); ++i) {
+                        const auto plan =
+                            can_driver::BuildMtRefreshPlan(cycle, i, queryPressureActive);
+                        for (std::size_t j = 0; j < plan.count; ++j) {
+                            protocol->issueRefreshQuery(
+                                static_cast<MotorID>(motorIds[i]), plan.items[j]);
+                        }
+                    }
                     const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     runtime->nextMtTick = std::chrono::steady_clock::now() + nextSleep;
@@ -87,13 +144,29 @@ void DeviceManager::syncDeviceRefreshRuntimeLocked(const std::string &device)
             if (runtime->ppActive.load(std::memory_order_acquire)) {
                 const auto protocol = runtime->ppProtocol.lock();
                 bool due = false;
+                std::uint64_t cycle = 0;
+                std::vector<std::uint8_t> motorIds;
                 {
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     due = (runtime->nextPpTick == std::chrono::steady_clock::time_point {}) ||
                           (now >= runtime->nextPpTick);
+                    if (due) {
+                        cycle = runtime->ppScheduleCycleCount++;
+                        motorIds = runtime->ppMotorIds;
+                    }
                 }
                 if (protocol && due) {
-                    protocol->runRefreshCycle(queryPressureActive);
+                    const auto sharedState = runtime->sharedState.lock();
+                    for (std::size_t i = 0; i < motorIds.size(); ++i) {
+                        const auto snapshot = buildPpAxisRefreshSnapshot(
+                            sharedState, runtime->deviceName, motorIds[i]);
+                        const auto plan = can_driver::BuildPpRefreshPlan(
+                            cycle, i, queryPressureActive, snapshot);
+                        for (std::size_t j = 0; j < plan.count; ++j) {
+                            protocol->issueRefreshQuery(
+                                static_cast<MotorID>(motorIds[i]), plan.items[j]);
+                        }
+                    }
                     const auto nextSleep = clampRefreshSleep(protocol->refreshSleepInterval());
                     std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
                     runtime->nextPpTick = std::chrono::steady_clock::now() + nextSleep;
@@ -369,26 +442,35 @@ bool DeviceManager::initDevice(const std::string &device,
     }
 
     syncDeviceRefreshRuntimeLocked(device);
+    const auto runtime = deviceRefreshRuntimes_[device];
 
     if (!mtIds.empty()) {
         mtProtocols_[device]->initializeMotorRefresh(mtIds);
-        deviceRefreshRuntimes_[device]->mtActive.store(true, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
-        deviceRefreshRuntimes_[device]->nextMtTick = std::chrono::steady_clock::time_point {};
+        runtime->mtActive.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->mtMotorIds = normalizeMotorIds(mtIds);
+        runtime->mtScheduleCycleCount = 0;
+        runtime->nextMtTick = std::chrono::steady_clock::time_point {};
     } else {
-        deviceRefreshRuntimes_[device]->mtActive.store(false, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
-        deviceRefreshRuntimes_[device]->nextMtTick = std::chrono::steady_clock::time_point {};
+        runtime->mtActive.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->mtMotorIds.clear();
+        runtime->mtScheduleCycleCount = 0;
+        runtime->nextMtTick = std::chrono::steady_clock::time_point {};
     }
     if (!ppIds.empty()) {
         eyouProtocols_[device]->initializeMotorRefresh(ppIds);
-        deviceRefreshRuntimes_[device]->ppActive.store(true, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
-        deviceRefreshRuntimes_[device]->nextPpTick = std::chrono::steady_clock::time_point {};
+        runtime->ppActive.store(true, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->ppMotorIds = normalizeMotorIds(ppIds);
+        runtime->ppScheduleCycleCount = 0;
+        runtime->nextPpTick = std::chrono::steady_clock::time_point {};
     } else {
-        deviceRefreshRuntimes_[device]->ppActive.store(false, std::memory_order_release);
-        std::lock_guard<std::mutex> lock(deviceRefreshRuntimes_[device]->scheduleMutex);
-        deviceRefreshRuntimes_[device]->nextPpTick = std::chrono::steady_clock::time_point {};
+        runtime->ppActive.store(false, std::memory_order_release);
+        std::lock_guard<std::mutex> lock(runtime->scheduleMutex);
+        runtime->ppMotorIds.clear();
+        runtime->ppScheduleCycleCount = 0;
+        runtime->nextPpTick = std::chrono::steady_clock::time_point {};
     }
     startDeviceRefreshWorkerLocked(device);
 
@@ -408,8 +490,13 @@ void DeviceManager::startRefresh(const std::string &device,
             syncDeviceRefreshRuntimeLocked(device);
             auto runtime = deviceRefreshRuntimes_[device];
             runtime->mtActive.store(!ids.empty(), std::memory_order_release);
+            const auto normalizedIds = normalizeMotorIds(ids);
             {
                 std::lock_guard<std::mutex> scheduleLock(runtime->scheduleMutex);
+                if (runtime->mtMotorIds != normalizedIds) {
+                    runtime->mtMotorIds = normalizedIds;
+                    runtime->mtScheduleCycleCount = 0;
+                }
                 runtime->nextMtTick = std::chrono::steady_clock::time_point {};
             }
             if (runtime->mtActive.load(std::memory_order_acquire) ||
@@ -426,8 +513,13 @@ void DeviceManager::startRefresh(const std::string &device,
             syncDeviceRefreshRuntimeLocked(device);
             auto runtime = deviceRefreshRuntimes_[device];
             runtime->ppActive.store(!ids.empty(), std::memory_order_release);
+            const auto normalizedIds = normalizeMotorIds(ids);
             {
                 std::lock_guard<std::mutex> scheduleLock(runtime->scheduleMutex);
+                if (runtime->ppMotorIds != normalizedIds) {
+                    runtime->ppMotorIds = normalizedIds;
+                    runtime->ppScheduleCycleCount = 0;
+                }
                 runtime->nextPpTick = std::chrono::steady_clock::time_point {};
             }
             if (runtime->mtActive.load(std::memory_order_acquire) ||

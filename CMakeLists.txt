@@ -361,6 +361,26 @@ if(CATKIN_ENABLE_TESTING)
     endif()
   endif()
 
+  catkin_add_gtest(test_refresh_scheduler
+    tests/test_refresh_scheduler.cpp
+  )
+  if(TARGET test_refresh_scheduler)
+    target_include_directories(test_refresh_scheduler PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_refresh_scheduler
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_refresh_scheduler
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
   catkin_add_gtest(test_eyou_can_protocol
     tests/test_eyou_can_protocol.cpp
   )
