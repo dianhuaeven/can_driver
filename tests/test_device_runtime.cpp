@@ -2,6 +2,7 @@
 #include <ros/time.h>
 
 #include "can_driver/DeviceRuntime.h"
+#include "can_driver/SharedDriverState.h"
 
 #include <chrono>
 #include <deque>
@@ -243,6 +244,50 @@ TEST_F(DeviceRuntimeTest, LinkDownCountedInStats)
     const auto stats = runtime.snapshotStats();
     EXPECT_EQ(stats.sendLinkDown, 1u);
     EXPECT_EQ(stats.sent, 0u);
+}
+
+TEST_F(DeviceRuntimeTest, BackpressureUpdatesSharedDeviceHealth)
+{
+    auto transport = std::make_shared<MockTransport>();
+    auto sharedState = std::make_shared<can_driver::SharedDriverState>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    DeviceRuntime runtime(transport, "test_can0", options);
+    runtime.setSharedDriverState(sharedState);
+
+    transport->setNextResult(CanTransport::SendResult::Backpressure);
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Control, "bp_shared"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(200)));
+
+    can_driver::SharedDriverState::DeviceHealthState health;
+    ASSERT_TRUE(sharedState->getDeviceHealth("test_can0", &health));
+    EXPECT_EQ(health.txBackpressure, 1u);
+    EXPECT_EQ(health.txLinkUnavailable, 0u);
+    EXPECT_EQ(health.txError, 0u);
+}
+
+TEST_F(DeviceRuntimeTest, LinkDownUpdatesSharedDeviceHealthImmediately)
+{
+    auto transport = std::make_shared<MockTransport>();
+    auto sharedState = std::make_shared<can_driver::SharedDriverState>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    DeviceRuntime runtime(transport, "test_can0", options);
+    runtime.setSharedDriverState(sharedState);
+
+    transport->setNextResult(CanTransport::SendResult::LinkDown);
+    runtime.submit({makeFrame(0x01), CanTxDispatcher::Category::Query, "link_shared"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(200)));
+
+    can_driver::SharedDriverState::DeviceHealthState health;
+    ASSERT_TRUE(sharedState->getDeviceHealth("test_can0", &health));
+    EXPECT_FALSE(health.transportReady);
+    EXPECT_EQ(health.txLinkUnavailable, 1u);
+    EXPECT_GT(health.lastTxLinkUnavailableSteadyNs, 0);
 }
 
 TEST_F(DeviceRuntimeTest, MixedResultsCountedCorrectly)

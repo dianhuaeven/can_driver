@@ -2,6 +2,7 @@
 #define CAN_DRIVER_DEVICE_RUNTIME_H
 
 #include "can_driver/CanTxDispatcher.h"
+#include "can_driver/SharedDriverState.h"
 
 #include <atomic>
 #include <chrono>
@@ -62,11 +63,13 @@ public:
     void shutdown();
     bool waitUntilIdleFor(std::chrono::milliseconds timeout);
     Stats snapshotStats() const;
+    void setSharedDriverState(std::shared_ptr<can_driver::SharedDriverState> sharedState);
 
 private:
     using Queue = std::deque<Request>;
 
     void workerLoop();
+    void noteSharedSendResult(CanTransport::SendResult result);
     bool allQueuesEmptyLocked() const;
     bool popNextLocked(Request *request);
     Queue &queueFor(Category category);
@@ -76,6 +79,7 @@ private:
     void enqueueControlLocked(const Request &request);
 
     std::shared_ptr<CanTransport> transport_;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState_;
     const std::string deviceName_;
     const Options options_;
 

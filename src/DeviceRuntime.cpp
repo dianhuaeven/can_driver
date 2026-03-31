@@ -115,6 +115,12 @@ void DeviceRuntime::start()
     workerThread_ = std::thread(&DeviceRuntime::workerLoop, this);
 }
 
+void DeviceRuntime::setSharedDriverState(std::shared_ptr<can_driver::SharedDriverState> sharedState)
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    sharedState_ = std::move(sharedState);
+}
+
 void DeviceRuntime::shutdown()
 {
     {
@@ -231,11 +237,53 @@ void DeviceRuntime::workerLoop()
             break;
         }
 
+        noteSharedSendResult(result);
+
         {
             std::lock_guard<std::mutex> lock(mutex_);
             sending_ = false;
         }
         idleCv_.notify_all();
+    }
+}
+
+void DeviceRuntime::noteSharedSendResult(CanTransport::SendResult result)
+{
+    std::shared_ptr<can_driver::SharedDriverState> sharedState;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sharedState = sharedState_;
+    }
+    if (!sharedState || deviceName_.empty()) {
+        return;
+    }
+
+    switch (result) {
+    case CanTransport::SendResult::Ok:
+        return;
+    case CanTransport::SendResult::Backpressure:
+        sharedState->mutateDeviceHealth(
+            deviceName_,
+            [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                ++health->txBackpressure;
+            });
+        return;
+    case CanTransport::SendResult::LinkDown:
+        sharedState->mutateDeviceHealth(
+            deviceName_,
+            [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                ++health->txLinkUnavailable;
+                health->transportReady = false;
+                health->lastTxLinkUnavailableSteadyNs = can_driver::SharedDriverSteadyNowNs();
+            });
+        return;
+    case CanTransport::SendResult::Error:
+        sharedState->mutateDeviceHealth(
+            deviceName_,
+            [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                ++health->txError;
+            });
+        return;
     }
 }
 

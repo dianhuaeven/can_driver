@@ -148,6 +148,7 @@ bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
 
     transports_[device] = transport;
     txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
+    std::static_pointer_cast<DeviceRuntime>(txDispatchers_[device])->setSharedDriverState(sharedState_);
     if (sharedState_) {
         const auto stats = transport->snapshotStats();
         sharedState_->mutateDeviceHealth(
@@ -216,6 +217,7 @@ bool DeviceManager::initDevice(const std::string &device,
         }
         transports_[device] = transport;
         txDispatchers_[device] = std::make_shared<DeviceRuntime>(transport, device);
+        std::static_pointer_cast<DeviceRuntime>(txDispatchers_[device])->setSharedDriverState(sharedState_);
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
         transportIt = transports_.find(device);
     } else {
@@ -234,6 +236,7 @@ bool DeviceManager::initDevice(const std::string &device,
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
     }
     txDispatchers_[device] = std::make_shared<DeviceRuntime>(transportIt->second, device);
+    std::static_pointer_cast<DeviceRuntime>(txDispatchers_[device])->setSharedDriverState(sharedState_);
     if (sharedState_) {
         for (const auto &entry : motors) {
             sharedState_->registerAxis(device, entry.first, entry.second);
