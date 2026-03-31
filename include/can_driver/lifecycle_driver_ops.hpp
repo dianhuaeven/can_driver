@@ -1,10 +1,12 @@
 #ifndef CAN_DRIVER_LIFECYCLE_DRIVER_OPS_HPP
 #define CAN_DRIVER_LIFECYCLE_DRIVER_OPS_HPP
 
+#include "can_driver/AxisRuntime.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/motor_action_executor.hpp"
 #include "can_driver/operational_coordinator.hpp"
 
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -49,10 +51,18 @@ private:
     std::shared_ptr<std::mutex> getDeviceMutex(const std::string &device) const;
     bool isDeviceReady(const std::string &device) const;
     std::shared_ptr<SharedDriverState> getSharedDriverState() const;
+    AxisRuntimeStatus evaluateAxisRuntime(
+        const SharedDriverState::AxisKey &axisKey,
+        const SharedDriverState::AxisFeedbackState &feedback,
+        const SharedDriverState::AxisCommandState *command,
+        AxisIntent intent,
+        const SharedDriverState::DeviceHealthState *deviceHealth) const;
 
     std::shared_ptr<IDeviceManager> deviceManager_;
     const MotorActionExecutor *motorActionExecutor_{nullptr};
     mutable std::mutex targetsMutex_;
+    mutable std::mutex axisRuntimeMutex_;
+    mutable std::map<std::string, AxisRuntime> axisRuntimes_;
     std::vector<MotorActionExecutor::Target> targets_;
 };
 

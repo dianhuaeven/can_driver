@@ -1,13 +1,16 @@
 #include <gtest/gtest.h>
 
+#include "can_driver/AxisRuntime.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/lifecycle_driver_ops.hpp"
 
+#include <chrono>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -220,6 +223,112 @@ std::vector<MotorActionExecutor::Target> makeTargets()
     };
 }
 
+TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
+{
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    can_driver::AxisRuntime runtime;
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    feedback.key = key;
+    feedback.feedbackSeen = true;
+    feedback.enabled = true;
+    feedback.lastRxSteadyNs = nowNs;
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    command.key = key;
+
+    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+    deviceHealth.device = "fake1";
+    deviceHealth.transportReady = true;
+
+    const auto armed = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(armed.state, can_driver::AxisRuntimeState::Armed);
+    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(armed));
+
+    command.valid = true;
+    command.desiredMode = CanProtocol::MotorMode::Position;
+    feedback.mode = CanProtocol::MotorMode::Position;
+    feedback.lastModeMatchSteadyNs = nowNs;
+
+    const auto running = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(running.state, can_driver::AxisRuntimeState::Running);
+    EXPECT_TRUE(can_driver::AxisRuntime::MotionReady(running));
+}
+
+TEST(AxisRuntimeTest, PpAxisUsesSeenAndFaultedStatesForUnhealthyPaths)
+{
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    can_driver::AxisRuntime runtime;
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    feedback.key = key;
+    feedback.feedbackSeen = true;
+    feedback.enabled = true;
+    feedback.lastRxSteadyNs = nowNs - 600000000LL;
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    command.key = key;
+
+    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+    deviceHealth.device = "fake1";
+    deviceHealth.transportReady = true;
+
+    const auto seen = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(seen.state, can_driver::AxisRuntimeState::Seen);
+    EXPECT_FALSE(can_driver::AxisRuntime::MotionReady(seen));
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(seen), "Feedback degraded.");
+
+    feedback.lastRxSteadyNs = nowNs;
+    feedback.fault = true;
+    const auto faulted = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
+    EXPECT_EQ(faulted.state, can_driver::AxisRuntimeState::Faulted);
+    EXPECT_EQ(can_driver::AxisRuntime::DescribeMotionBlock(faulted), "Fault still active.");
+}
+
+TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
+{
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    can_driver::AxisRuntime runtime;
+
+    can_driver::SharedDriverState::AxisFeedbackState feedback;
+    feedback.key = key;
+    feedback.feedbackSeen = true;
+    feedback.enabled = true;
+    feedback.lastRxSteadyNs = nowNs;
+
+    can_driver::SharedDriverState::AxisCommandState command;
+    command.key = key;
+
+    can_driver::SharedDriverState::DeviceHealthState deviceHealth;
+    deviceHealth.device = "fake1";
+    deviceHealth.transportReady = true;
+
+    const auto firstRecovering = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs);
+    EXPECT_EQ(firstRecovering.state, can_driver::AxisRuntimeState::Recovering);
+
+    const auto sameFrameRecovering = runtime.Evaluate(
+        feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs + 1000000LL);
+    EXPECT_EQ(sameFrameRecovering.state, can_driver::AxisRuntimeState::Recovering);
+
+    feedback.lastRxSteadyNs = nowNs + 20000000LL;
+    feedback.fault = false;
+    const auto recovered = runtime.Evaluate(
+        feedback,
+        &command,
+        can_driver::AxisIntent::Recover,
+        &deviceHealth,
+        feedback.lastRxSteadyNs);
+    EXPECT_EQ(recovered.state, can_driver::AxisRuntimeState::Armed);
+}
+
 TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
 {
     auto deviceManager = std::make_shared<FakeDeviceManager>();
@@ -328,6 +437,11 @@ TEST(LifecycleDriverOpsTest, MotionHealthyUsesSharedStateDegradationBeforeProtoc
         MotorActionExecutor::Target{"joint_a", "fake0", CanType::MT, static_cast<MotorID>(0x141)},
     });
 
+    deviceManager->sharedState()->mutateDeviceHealth(
+        "fake0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
     deviceManager->sharedState()->mutateAxisFeedback(
         can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
         [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
@@ -358,6 +472,120 @@ TEST(LifecycleDriverOpsTest, AnyFaultActiveUsesSharedStateFeedback)
         });
 
     EXPECT_TRUE(ops.anyFaultActive());
+}
+
+TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisRuntimeForPpModeMismatch)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_c", "fake1", CanType::PP, static_cast<MotorID>(0x201)},
+    });
+
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    deviceManager->sharedState()->mutateDeviceHealth(
+        "fake1",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    deviceManager->sharedState()->mutateAxisFeedback(
+        key,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Velocity;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+    deviceManager->sharedState()->mutateAxisCommand(
+        key,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->valid = true;
+            command->desiredMode = CanProtocol::MotorMode::Position;
+        });
+    deviceManager->sharedState()->setAxisIntent(key, can_driver::AxisIntent::Enable);
+
+    std::string detail;
+    EXPECT_FALSE(ops.motionHealthy(&detail));
+    EXPECT_EQ(detail, "Mode not ready.");
+}
+
+TEST(LifecycleDriverOpsTest, MotionHealthyAcceptsFreshPpAxisBeforeFirstMotionCommand)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_c", "fake1", CanType::PP, static_cast<MotorID>(0x201)},
+    });
+
+    deviceManager->sharedState()->mutateDeviceHealth(
+        "fake1",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    deviceManager->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201)),
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+
+    std::string detail;
+    EXPECT_TRUE(ops.motionHealthy(&detail));
+    EXPECT_TRUE(detail.empty());
+}
+
+TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisRuntimeRecoveryConfirmation)
+{
+    auto deviceManager = std::make_shared<FakeDeviceManager>();
+    MotorActionExecutor executor(deviceManager);
+    can_driver::LifecycleDriverOps ops(deviceManager, &executor);
+    ops.setTargets({
+        MotorActionExecutor::Target{"joint_c", "fake1", CanType::PP, static_cast<MotorID>(0x201)},
+    });
+
+    const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
+    deviceManager->sharedState()->mutateDeviceHealth(
+        "fake1",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    deviceManager->sharedState()->setAxisIntent(key, can_driver::AxisIntent::Recover);
+    deviceManager->sharedState()->mutateAxisFeedback(
+        key,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->fault = true;
+            feedback->enabled = true;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+
+    std::thread feedbackThread([sharedState = deviceManager->sharedState(), key]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        sharedState->mutateAxisFeedback(
+            key,
+            [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                feedback->fault = false;
+                feedback->enabled = true;
+                feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+            });
+        std::this_thread::sleep_for(std::chrono::milliseconds(70));
+        sharedState->mutateAxisFeedback(
+            key,
+            [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                feedback->fault = false;
+                feedback->enabled = true;
+                feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+            });
+    });
+
+    const auto result = ops.recoverAll();
+    feedbackThread.join();
+
+    EXPECT_TRUE(result.ok);
+    EXPECT_EQ(result.message, "Recovered (standby).");
 }
 
 } // namespace

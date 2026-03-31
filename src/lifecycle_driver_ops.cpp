@@ -1,3 +1,4 @@
+#include "can_driver/AxisRuntime.h"
 #include "can_driver/lifecycle_driver_ops.hpp"
 #include "can_driver/SharedDriverState.h"
 
@@ -6,6 +7,21 @@
 #include <utility>
 
 namespace can_driver {
+
+namespace {
+
+const char *axisRuntimeProtocolName(CanType protocol)
+{
+    return protocol == CanType::MT ? "mt" : "pp";
+}
+
+std::string axisRuntimeMapKey(const SharedDriverState::AxisKey &key)
+{
+    return key.device + "|" + axisRuntimeProtocolName(key.protocol) + "|" +
+           std::to_string(key.motorId);
+}
+
+} // namespace
 
 LifecycleDriverOps::LifecycleDriverOps(std::shared_ptr<IDeviceManager> deviceManager,
                                        const MotorActionExecutor *motorActionExecutor)
@@ -17,15 +33,23 @@ LifecycleDriverOps::LifecycleDriverOps(std::shared_ptr<IDeviceManager> deviceMan
 void LifecycleDriverOps::configure(std::shared_ptr<IDeviceManager> deviceManager,
                                    const MotorActionExecutor *motorActionExecutor)
 {
-    std::lock_guard<std::mutex> lock(targetsMutex_);
-    deviceManager_ = std::move(deviceManager);
-    motorActionExecutor_ = motorActionExecutor;
+    {
+        std::lock_guard<std::mutex> lock(targetsMutex_);
+        deviceManager_ = std::move(deviceManager);
+        motorActionExecutor_ = motorActionExecutor;
+    }
+    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    axisRuntimes_.clear();
 }
 
 void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> targets)
 {
-    std::lock_guard<std::mutex> lock(targetsMutex_);
-    targets_ = std::move(targets);
+    {
+        std::lock_guard<std::mutex> lock(targetsMutex_);
+        targets_ = std::move(targets);
+    }
+    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    axisRuntimes_.clear();
 }
 
 std::vector<MotorActionExecutor::Target> LifecycleDriverOps::targetsSnapshot() const
@@ -113,6 +137,18 @@ std::shared_ptr<SharedDriverState> LifecycleDriverOps::getSharedDriverState() co
         return nullptr;
     }
     return deviceManager_->getSharedDriverState();
+}
+
+AxisRuntimeStatus LifecycleDriverOps::evaluateAxisRuntime(
+    const SharedDriverState::AxisKey &axisKey,
+    const SharedDriverState::AxisFeedbackState &feedback,
+    const SharedDriverState::AxisCommandState *command,
+    AxisIntent intent,
+    const SharedDriverState::DeviceHealthState *deviceHealth) const
+{
+    std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
+    return axisRuntimes_[axisRuntimeMapKey(axisKey)].Evaluate(
+        feedback, command, intent, deviceHealth);
 }
 
 bool LifecycleDriverOps::queryMotorFault(const MotorActionExecutor::Target &target,
@@ -263,6 +299,35 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
     while (std::chrono::steady_clock::now() < deadline) {
         bool allHealthy = true;
         for (const auto &target : targets) {
+            if (const auto sharedState = getSharedDriverState()) {
+                const auto axisKey =
+                    MakeAxisKey(target.canDevice, target.protocol, target.motorId);
+                SharedDriverState::AxisFeedbackState feedback;
+                if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+                    SharedDriverState::AxisCommandState command;
+                    const SharedDriverState::AxisCommandState *commandPtr =
+                        sharedState->getAxisCommand(axisKey, &command) ? &command : nullptr;
+                    SharedDriverState::DeviceHealthState deviceHealth;
+                    const SharedDriverState::DeviceHealthState *deviceHealthPtr =
+                        sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
+                            ? &deviceHealth
+                            : nullptr;
+
+                    const auto runtime = evaluateAxisRuntime(axisKey,
+                                                             feedback,
+                                                             commandPtr,
+                                                             sharedState->getAxisIntent(axisKey),
+                                                             deviceHealthPtr);
+                    if (runtime.state != AxisRuntimeState::Standby &&
+                        runtime.state != AxisRuntimeState::Armed &&
+                        runtime.state != AxisRuntimeState::Running) {
+                        allHealthy = false;
+                        break;
+                    }
+                    continue;
+                }
+            }
+
             bool hasFault = false;
             if (!queryMotorFault(target, &hasFault)) {
                 return {false, "Protocol not available during fault verification."};
@@ -313,20 +378,28 @@ bool LifecycleDriverOps::motionHealthy(std::string *detail) const
             return false;
         }
         if (const auto sharedState = getSharedDriverState()) {
+            const auto axisKey = MakeAxisKey(target.canDevice, target.protocol, target.motorId);
             SharedDriverState::AxisFeedbackState feedback;
-            if (sharedState->getAxisFeedback(
-                    MakeAxisKey(target.canDevice, target.protocol, target.motorId),
-                    &feedback) &&
-                feedback.feedbackSeen) {
-                if (feedback.consecutiveTimeoutCount > 0) {
+            if (sharedState->getAxisFeedback(axisKey, &feedback)) {
+                SharedDriverState::AxisCommandState command;
+                const SharedDriverState::AxisCommandState *commandPtr =
+                    sharedState->getAxisCommand(axisKey, &command) ? &command : nullptr;
+
+                SharedDriverState::DeviceHealthState deviceHealth;
+                const SharedDriverState::DeviceHealthState *deviceHealthPtr =
+                    sharedState->getDeviceHealth(target.canDevice, &deviceHealth)
+                        ? &deviceHealth
+                        : nullptr;
+
+                const auto runtime = evaluateAxisRuntime(
+                    axisKey,
+                    feedback,
+                    commandPtr,
+                    sharedState->getAxisIntent(axisKey),
+                    deviceHealthPtr);
+                if (!AxisRuntime::MotionReady(runtime)) {
                     if (detail) {
-                        *detail = "Feedback degraded.";
-                    }
-                    return false;
-                }
-                if (feedback.fault) {
-                    if (detail) {
-                        *detail = "Fault still active.";
+                        *detail = AxisRuntime::DescribeMotionBlock(runtime);
                     }
                     return false;
                 }
