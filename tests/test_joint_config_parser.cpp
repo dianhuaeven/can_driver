@@ -2,6 +2,7 @@
 
 #include "can_driver/JointConfigParser.h"
 
+#include <cmath>
 #include <string>
 #include <vector>
 
@@ -200,6 +201,22 @@ TEST(JointConfigParser, ParseReadsExplicitScales)
     ASSERT_EQ(out.size(), 1u);
     EXPECT_DOUBLE_EQ(out[0].positionScale, 0.01);
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 0.02);
+}
+
+TEST(JointConfigParser, ParseConvertsPprToNormalizedScale)
+{
+    XmlRpc::XmlRpcValue motorId(9);
+    auto joint = makeJointBase("joint_ppr_scale", motorId, "PP");
+    joint["position_scale"] = 65536;
+    joint["velocity_scale"] = 32768;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_NEAR(out[0].positionScale, 2.0 * M_PI / 65536.0, 1e-12);
+    EXPECT_NEAR(out[0].velocityScale, 2.0 * M_PI / 32768.0, 1e-12);
 }
 
 TEST(JointConfigParser, InvalidStringMotorIdFails)

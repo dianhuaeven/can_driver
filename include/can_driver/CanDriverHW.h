@@ -147,6 +147,7 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     void startMotorRefreshThreads();
     bool syncStartupPositionAndCommands();
+    bool applyInitialModes();
     void setupMaintenanceRosComm(ros::NodeHandle &pnh);
     void configureCommandGate();
     void configureLifecycleCoordinator();

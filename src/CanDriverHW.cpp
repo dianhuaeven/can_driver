@@ -64,6 +64,10 @@ bool CanDriverHW::init(ros::NodeHandle &nh, ros::NodeHandle &pnh)
         resetInternalState();
         return false;
     }
+    if (!applyInitialModes()) {
+        resetInternalState();
+        return false;
+    }
     setupMaintenanceRosComm(pnh);
 
     ROS_INFO("[CanDriverHW] Initialized with %zu joints on %zu CAN device(s).",
@@ -217,8 +221,10 @@ bool CanDriverHW::syncStartupPositionAndCommands()
             std::lock_guard<std::mutex> devLock(*devMutex);
             for (const std::size_t i : group.jointIndices) {
                 const auto &jc = joints_[i];
-                snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) * jc.positionScale;
-                snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) * jc.velocityScale;
+                snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) *
+                                   jc.positionScale;
+                snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) *
+                                   jc.velocityScale;
                 snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
                 snapshots[i].valid = true;
             }
@@ -239,10 +245,12 @@ bool CanDriverHW::syncStartupPositionAndCommands()
                 jc.eff = snapshots[i].eff;
             }
 
-            if (jc.controlMode == "position") {
+            if (jc.controlMode == "position" || jc.controlMode == "csp") {
                 // 上电后将位置命令对齐到当前反馈，避免控制循环首拍跳变。
+                // CSP 模式与 position 模式共用 posCmd，同样需要对齐。
                 jc.posCmd = jc.pos;
-                if (jc.hasLimits && jc.limits.has_position_limits) {
+                if (jc.controlMode == "position" &&
+                    jc.hasLimits && jc.limits.has_position_limits) {
                     if (jc.pos < jc.limits.min_position || jc.pos > jc.limits.max_position) {
                         startupOutOfRange = true;
                         ROS_ERROR("[CanDriverHW] Joint '%s' startup position %.6f rad out of limits [%.6f, %.6f].",
@@ -555,10 +563,10 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
         auto &jc = joints_[i];
         jc.hasDirectPosCmd = false;
         jc.hasDirectVelCmd = false;
-        if (jc.controlMode == "position") {
-            jc.posCmd = jc.pos;
-        } else {
+        if (jc.controlMode == "velocity") {
             jc.velCmd = 0.0;
+        } else {
+            jc.posCmd = jc.pos;
         }
         commandValidBuffer_[i] = 0;
     }
@@ -605,6 +613,32 @@ const CanDriverHW::JointConfig *CanDriverHW::findJointByMotorId(uint16_t motorId
 MotorActionExecutor::Target CanDriverHW::makeMotorTarget(const JointConfig &jc) const
 {
     return MotorActionExecutor::Target{jc.name, jc.canDevice, jc.protocol, jc.motorId};
+}
+
+bool CanDriverHW::applyInitialModes()
+{
+    bool allOk = true;
+    for (const auto &jc : joints_) {
+        if (jc.controlMode != "csp") {
+            continue;
+        }
+        const auto status = motorActionExecutor_.execute(
+            makeMotorTarget(jc),
+            [](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                return proto->setMode(id, CanProtocol::MotorMode::CSP);
+            },
+            "Set initial CSP mode");
+        if (status != MotorActionExecutor::Status::Ok) {
+            ROS_ERROR("[CanDriverHW] applyInitialModes: setMode(CSP) failed for joint '%s'. "
+                      "Refusing to activate to prevent motion in wrong mode.",
+                      jc.name.c_str());
+            allOk = false;
+        } else {
+            ROS_INFO("[CanDriverHW] applyInitialModes: joint '%s' set to CSP mode.",
+                     jc.name.c_str());
+        }
+    }
+    return allOk;
 }
 
 can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevice(
@@ -789,14 +823,18 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
     };
 
     if (req.command == can_driver::MotorCommand::Request::CMD_SET_MODE) {
-        if (req.value != 0.0 && req.value != 1.0) {
+        CanProtocol::MotorMode mode;
+        if (req.value == 0.0) {
+            mode = CanProtocol::MotorMode::Position;
+        } else if (req.value == 1.0) {
+            mode = CanProtocol::MotorMode::Velocity;
+        } else if (req.value == 2.0) {
+            mode = CanProtocol::MotorMode::CSP;
+        } else {
             res.success = false;
-            res.message = "CMD_SET_MODE value must be 0 or 1.";
+            res.message = "CMD_SET_MODE value must be 0 (position), 1 (velocity) or 2 (csp).";
             return true;
         }
-        const auto mode = (req.value == 0.0)
-                              ? CanProtocol::MotorMode::Position
-                              : CanProtocol::MotorMode::Velocity;
         const auto status = motorActionExecutor_.execute(
             makeMotorTarget(*target),
             [&mode](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
