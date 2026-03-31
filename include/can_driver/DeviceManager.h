@@ -102,6 +102,7 @@ private:
     std::shared_ptr<can_driver::SharedDriverState> sharedState_{
         std::make_shared<can_driver::SharedDriverState>()};
     bool ppFastWriteEnabled_{false};
+    double refreshRateHz_{0.0};
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。
     std::map<std::string, std::shared_ptr<std::mutex>> deviceCmdMutexes_;
 };

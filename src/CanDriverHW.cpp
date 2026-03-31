@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <xmlrpcpp/XmlRpcValue.h>
@@ -147,6 +148,14 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                  startupPositionSyncTimeoutSec_);
         startupPositionSyncTimeoutSec_ = 1.0;
     }
+    if (!pnh.getParam("startup_probe_query_hz", startupProbeQueryHz_)) {
+        startupProbeQueryHz_ = 5.0;
+    }
+    if (!std::isfinite(startupProbeQueryHz_) || startupProbeQueryHz_ <= 0.0) {
+        ROS_WARN("[CanDriverHW] Invalid startup_probe_query_hz=%.9g, fallback to 5.0 Hz.",
+                 startupProbeQueryHz_);
+        startupProbeQueryHz_ = 5.0;
+    }
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
     }
@@ -177,6 +186,8 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
              ppFastWriteEnabled_ ? "true" : "false");
     ROS_INFO("[CanDriverHW] startup_position_sync_timeout_sec=%.3f s.",
              startupPositionSyncTimeoutSec_);
+    ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",
+             startupProbeQueryHz_);
     ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, max_position_step_rad=%.6f.",
              safetyStopOnFault_ ? "true" : "false",
              safetyRequireEnabledForMotion_ ? "true" : "false",
@@ -199,36 +210,117 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
     };
 
     std::vector<JointSnapshot> snapshots(joints_.size());
+    std::vector<std::size_t> targetJointIndices;
+    targetJointIndices.reserve(joints_.size());
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        if (!deviceFilter.empty() && joints_[i].canDevice != deviceFilter) {
+            continue;
+        }
+        targetJointIndices.push_back(i);
+    }
+    if (targetJointIndices.empty()) {
+        return true;
+    }
 
-    // 给协议刷新线程一个短暂窗口拉取首轮反馈。
+    // 给协议刷新线程一个短暂窗口拉取首轮真实反馈。
     const double timeout = startupPositionSyncTimeoutSec_;
     const auto sleepDur = std::chrono::milliseconds(20);
     const int maxPasses = std::max(1, static_cast<int>(std::ceil(timeout / 0.02)));
+    const auto sharedState = deviceManager_ ? deviceManager_->getSharedDriverState() : nullptr;
 
-    for (int pass = 0; pass < maxPasses; ++pass) {
-        for (const auto &group : jointGroups_) {
-            if (!deviceFilter.empty() && group.canDevice != deviceFilter) {
-                continue;
-            }
-            auto proto = getProtocol(group.canDevice, group.protocol);
-            auto devMutex = getDeviceMutex(group.canDevice);
-            if (!proto || !devMutex) {
-                continue;
-            }
+    if (sharedState) {
+        bool allValid = false;
+        std::vector<std::string> missingJoints;
+        for (int pass = 0; pass < maxPasses; ++pass) {
+            allValid = true;
+            missingJoints.clear();
 
-            std::lock_guard<std::mutex> devLock(*devMutex);
-            for (const std::size_t i : group.jointIndices) {
+            for (const std::size_t i : targetJointIndices) {
                 const auto &jc = joints_[i];
-                snapshots[i].pos = static_cast<double>(proto->getPosition(jc.motorId)) *
-                                   jc.positionScale;
-                snapshots[i].vel = static_cast<double>(proto->getVelocity(jc.motorId)) *
-                                   jc.velocityScale;
-                snapshots[i].eff = static_cast<double>(proto->getCurrent(jc.motorId));
+                can_driver::SharedDriverState::AxisFeedbackState feedback;
+                const auto axisKey =
+                    can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
+                if (!sharedState->getAxisFeedback(axisKey, &feedback) ||
+                    !feedback.feedbackSeen || !feedback.positionValid ||
+                    feedback.lastRxSteadyNs <= 0) {
+                    allValid = false;
+                    missingJoints.push_back(jc.name);
+                    continue;
+                }
+
+                snapshots[i].pos =
+                    static_cast<double>(feedback.position) * jc.positionScale;
+                snapshots[i].vel = feedback.velocityValid
+                                       ? static_cast<double>(feedback.velocity) *
+                                             jc.velocityScale
+                                       : 0.0;
+                snapshots[i].eff =
+                    feedback.currentValid ? static_cast<double>(feedback.current) : 0.0;
                 snapshots[i].valid = true;
             }
+
+            if (allValid) {
+                break;
+            }
+
+            if (pass + 1 < maxPasses) {
+                std::this_thread::sleep_for(sleepDur);
+            }
         }
-        if (pass + 1 < maxPasses) {
-            std::this_thread::sleep_for(sleepDur);
+
+        if (!allValid) {
+            std::ostringstream oss;
+            for (std::size_t i = 0; i < missingJoints.size(); ++i) {
+                if (i > 0) {
+                    oss << ", ";
+                }
+                oss << missingJoints[i];
+            }
+            if (deviceFilter.empty()) {
+                ROS_ERROR("[CanDriverHW] Startup feedback sync timed out within %.3f s. "
+                          "Missing position feedback for joints: %s",
+                          timeout,
+                          oss.str().c_str());
+            } else {
+                ROS_ERROR("[CanDriverHW] Startup feedback sync timed out on device '%s' within %.3f s. "
+                          "Missing position feedback for joints: %s",
+                          deviceFilter.c_str(),
+                          timeout,
+                          oss.str().c_str());
+            }
+            return false;
+        }
+    } else {
+        ROS_WARN("[CanDriverHW] Shared driver state unavailable during startup sync; "
+                 "falling back to cached protocol values.");
+        for (int pass = 0; pass < maxPasses; ++pass) {
+            for (const auto &group : jointGroups_) {
+                if (!deviceFilter.empty() && group.canDevice != deviceFilter) {
+                    continue;
+                }
+                auto proto = getProtocol(group.canDevice, group.protocol);
+                auto devMutex = getDeviceMutex(group.canDevice);
+                if (!proto || !devMutex) {
+                    continue;
+                }
+
+                std::lock_guard<std::mutex> devLock(*devMutex);
+                for (const std::size_t i : group.jointIndices) {
+                    const auto &jc = joints_[i];
+                    snapshots[i].pos =
+                        static_cast<double>(proto->getPosition(jc.motorId)) *
+                        jc.positionScale;
+                    snapshots[i].vel =
+                        static_cast<double>(proto->getVelocity(jc.motorId)) *
+                        jc.velocityScale;
+                    snapshots[i].eff =
+                        static_cast<double>(proto->getCurrent(jc.motorId));
+                    snapshots[i].valid = true;
+                }
+            }
+            if (pass + 1 < maxPasses) {
+                std::this_thread::sleep_for(sleepDur);
+            }
         }
     }
 
@@ -641,12 +733,16 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
             return failure;
         };
 
+    const double startupQueryHz =
+        (motorQueryHz_ > 0.0)
+            ? std::min(startupProbeQueryHz_, motorQueryHz_)
+            : startupProbeQueryHz_;
+    deviceManager_->setRefreshRateHz(startupQueryHz);
+
     const auto prepareResult = lifecycleDriverOps_.prepareDevice(device, loopback);
     if (!prepareResult.ok) {
         return prepareResult;
     }
-
-    deviceManager_->setRefreshRateHz(motorQueryHz_);
 
     if (!syncStartupPositionAndCommands(device)) {
         return rollbackPreparedDevice(
@@ -660,6 +756,7 @@ can_driver::OperationalCoordinator::Result CanDriverHW::initializeLifecycleDevic
     if (!enableResult.ok) {
         return rollbackPreparedDevice(enableResult);
     }
+    deviceManager_->setRefreshRateHz(motorQueryHz_);
     active_.store(true, std::memory_order_release);
     stateTimer_.start();
     return {true, "initialized (armed)"};

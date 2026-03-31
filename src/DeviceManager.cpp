@@ -352,13 +352,15 @@ bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
     // 按协议类型按需懒加载实例。
     if (type == CanType::MT) {
         if (mtProtocols_.find(device) == mtProtocols_.end()) {
-            mtProtocols_[device] =
-                std::make_shared<MtCan>(transport, txDispatcher, sharedState_, device);
+            auto mt = std::make_shared<MtCan>(transport, txDispatcher, sharedState_, device);
+            mt->setRefreshRateHz(refreshRateHz_);
+            mtProtocols_[device] = std::move(mt);
         }
     } else {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
             auto eyou =
                 std::make_shared<EyouCan>(transport, txDispatcher, sharedState_, device);
+            eyou->setRefreshRateHz(refreshRateHz_);
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
             eyouProtocols_[device] = std::move(eyou);
         }
@@ -431,12 +433,15 @@ bool DeviceManager::initDevice(const std::string &device,
     }
     // 初始化协议对象并启动状态刷新任务。
     if (!mtIds.empty() && mtProtocols_.find(device) == mtProtocols_.end()) {
-        mtProtocols_[device] = std::make_shared<MtCan>(
+        auto mt = std::make_shared<MtCan>(
             transportIt->second, txDispatchers_[device], sharedState_, device);
+        mt->setRefreshRateHz(refreshRateHz_);
+        mtProtocols_[device] = std::move(mt);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
         auto eyou = std::make_shared<EyouCan>(
             transportIt->second, txDispatchers_[device], sharedState_, device);
+        eyou->setRefreshRateHz(refreshRateHz_);
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyouProtocols_[device] = std::move(eyou);
     }
@@ -534,7 +539,8 @@ void DeviceManager::startRefresh(const std::string &device,
 
 void DeviceManager::setRefreshRateHz(double hz)
 {
-    std::shared_lock<std::shared_mutex> lock(mutex_);
+    std::unique_lock<std::shared_mutex> lock(mutex_);
+    refreshRateHz_ = hz;
     for (auto &kv : mtProtocols_) {
         if (kv.second) {
             kv.second->setRefreshRateHz(hz);

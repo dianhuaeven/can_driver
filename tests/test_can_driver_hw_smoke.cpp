@@ -258,7 +258,7 @@ private:
 
 class FakeDeviceManager : public IDeviceManager {
 public:
-    explicit FakeDeviceManager(bool exposeSharedState = false)
+    explicit FakeDeviceManager(bool exposeSharedState = true)
         : protocol_(std::make_shared<FakeProtocol>())
         , mutex_(std::make_shared<std::mutex>())
         , sharedState_(std::make_shared<can_driver::SharedDriverState>())
@@ -282,17 +282,50 @@ public:
     }
 
     bool initDevice(const std::string &device,
-                    const std::vector<std::pair<CanType, MotorID>> &,
+                    const std::vector<std::pair<CanType, MotorID>> &motors,
                     bool = false) override
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
         ++initDeviceCalls_;
         initializedDevices_.insert(device);
+        initializedMotors_[device] = motors;
+        sharedState_->mutateDeviceHealth(
+            device,
+            [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = true;
+            });
+        if (seedFeedbackOnInit_) {
+            const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+            for (const auto &entry : motors) {
+                const auto key =
+                    can_driver::MakeAxisKey(device, entry.first, entry.second);
+                sharedState_->registerAxis(key);
+                sharedState_->mutateAxisFeedback(
+                    key,
+                    [this, nowNs, &entry](
+                        can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                        feedback->feedbackSeen = true;
+                        feedback->positionValid = true;
+                        feedback->velocityValid = true;
+                        feedback->currentValid = true;
+                        feedback->position = protocol_->getPosition(entry.second);
+                        feedback->velocity = protocol_->getVelocity(entry.second);
+                        feedback->current = protocol_->getCurrent(entry.second);
+                        feedback->mode = protocol_->lastMode();
+                        feedback->lastRxSteadyNs = nowNs;
+                        feedback->lastValidStateSteadyNs = nowNs;
+                    });
+            }
+        }
         return true;
     }
 
     void startRefresh(const std::string &, CanType, const std::vector<MotorID> &) override {}
-    void setRefreshRateHz(double) override {}
+    void setRefreshRateHz(double hz) override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        refreshRateHzCalls_.push_back(hz);
+    }
     void setPpFastWriteEnabled(bool) override {}
     void shutdownDevice(const std::string &device) override
     {
@@ -300,6 +333,12 @@ public:
         ++shutdownDeviceCalls_;
         lastShutdownDevice_ = device;
         initializedDevices_.erase(device);
+        initializedMotors_.erase(device);
+        sharedState_->mutateDeviceHealth(
+            device,
+            [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                health->transportReady = false;
+            });
     }
     void shutdownAll() override
     {
@@ -320,7 +359,40 @@ public:
     bool isDeviceReady(const std::string &) const override
     {
         std::lock_guard<std::mutex> lock(readyMutex_);
-        return ready_;
+        if (!ready_ || !exposeSharedState_ || !seedFeedbackOnInit_) {
+            return ready_;
+        }
+
+        const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+        std::lock_guard<std::mutex> lifecycleLock(lifecycleMutex_);
+        for (const auto &deviceEntry : initializedMotors_) {
+            sharedState_->mutateDeviceHealth(
+                deviceEntry.first,
+                [](can_driver::SharedDriverState::DeviceHealthState *health) {
+                    health->transportReady = true;
+                });
+            for (const auto &motorEntry : deviceEntry.second) {
+                const auto key = can_driver::MakeAxisKey(
+                    deviceEntry.first, motorEntry.first, motorEntry.second);
+                sharedState_->mutateAxisFeedback(
+                    key,
+                    [this, nowNs, &motorEntry](
+                        can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                        feedback->feedbackSeen = true;
+                        feedback->positionValid = true;
+                        feedback->velocityValid = true;
+                        feedback->currentValid = true;
+                        feedback->position = protocol_->getPosition(motorEntry.second);
+                        feedback->velocity = protocol_->getVelocity(motorEntry.second);
+                        feedback->current = protocol_->getCurrent(motorEntry.second);
+                        feedback->enabled = protocol_->isEnabled(motorEntry.second);
+                        feedback->fault = protocol_->hasFault(motorEntry.second);
+                        feedback->lastRxSteadyNs = nowNs;
+                        feedback->lastValidStateSteadyNs = nowNs;
+                    });
+            }
+        }
+        return true;
     }
     std::size_t deviceCount() const override
     {
@@ -370,6 +442,18 @@ public:
         return initDeviceCalls_;
     }
 
+    void setSeedFeedbackOnInit(bool seed)
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        seedFeedbackOnInit_ = seed;
+    }
+
+    std::vector<double> refreshRateHzCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return refreshRateHzCalls_;
+    }
+
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
@@ -383,9 +467,12 @@ private:
     int ensureTransportCalls_{0};
     int ensureProtocolCalls_{0};
     int initDeviceCalls_{0};
+    bool seedFeedbackOnInit_{true};
+    std::vector<double> refreshRateHzCalls_;
     std::set<std::string> ensuredDevices_;
     std::set<std::pair<std::string, CanType>> ensuredProtocols_;
     std::set<std::string> initializedDevices_;
+    std::map<std::string, std::vector<std::pair<CanType, MotorID>>> initializedMotors_;
 };
 
 class CanDriverHWSmokeTest : public ::testing::Test {
@@ -508,6 +595,33 @@ TEST_F(CanDriverHWSmokeTest, InitDefersDeviceActivationUntilLifecycleInit)
     EXPECT_EQ(fakeDm->ensureProtocolCalls(), 0);
     EXPECT_EQ(fakeDm->initDeviceCalls(), 1);
     EXPECT_EQ(fakeDm->deviceCount(), 1u);
+}
+
+TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->setSeedFeedbackOnInit(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_startup_timeout"));
+
+    pnh.setParam("joints", makeSingleVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("startup_position_sync_timeout_sec", 0.05);
+    pnh.setParam("startup_probe_query_hz", 2.0);
+    pnh.setParam("motor_query_hz", 20.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    EXPECT_FALSE(initResult.ok);
+    EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 1);
+    EXPECT_EQ(fakeDm->lastShutdownDevice(), "fake0");
+
+    const auto refreshCalls = fakeDm->refreshRateHzCalls();
+    ASSERT_FALSE(refreshCalls.empty());
+    EXPECT_DOUBLE_EQ(refreshCalls.front(), 2.0);
 }
 
 TEST_F(CanDriverHWSmokeTest, MotorCommandServiceEnable)

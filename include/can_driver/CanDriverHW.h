@@ -131,6 +131,7 @@ private:
     bool debugBypassRosControl_{false};
     bool ppFastWriteEnabled_{false};
     double startupPositionSyncTimeoutSec_{1.0};
+    double startupProbeQueryHz_{5.0};
     bool safetyStopOnFault_{true};
     bool safetyRequireEnabledForMotion_{true};
     double maxPositionStepRad_{0.0};
