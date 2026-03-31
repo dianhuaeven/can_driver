@@ -1,4 +1,4 @@
-#include "can_driver/AxisRuntime.h"
+#include "can_driver/AxisReadinessEvaluator.h"
 #include "can_driver/lifecycle_driver_ops.hpp"
 #include "can_driver/SharedDriverState.h"
 
@@ -10,14 +10,14 @@ namespace can_driver {
 
 namespace {
 
-const char *axisRuntimeProtocolName(CanType protocol)
+const char *axisReadinessProtocolName(CanType protocol)
 {
     return protocol == CanType::MT ? "mt" : "pp";
 }
 
-std::string axisRuntimeMapKey(const SharedDriverState::AxisKey &key)
+std::string axisReadinessMapKey(const SharedDriverState::AxisKey &key)
 {
-    return key.device + "|" + axisRuntimeProtocolName(key.protocol) + "|" +
+    return key.device + "|" + axisReadinessProtocolName(key.protocol) + "|" +
            std::to_string(key.motorId);
 }
 
@@ -39,7 +39,7 @@ void LifecycleDriverOps::configure(std::shared_ptr<IDeviceManager> deviceManager
         motorActionExecutor_ = motorActionExecutor;
     }
     std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
-    axisRuntimes_.clear();
+    axisReadinessEvaluators_.clear();
 }
 
 void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> targets)
@@ -49,7 +49,7 @@ void LifecycleDriverOps::setTargets(std::vector<MotorActionExecutor::Target> tar
         targets_ = std::move(targets);
     }
     std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
-    axisRuntimes_.clear();
+    axisReadinessEvaluators_.clear();
 }
 
 std::vector<MotorActionExecutor::Target> LifecycleDriverOps::targetsSnapshot() const
@@ -139,7 +139,7 @@ std::shared_ptr<SharedDriverState> LifecycleDriverOps::getSharedDriverState() co
     return deviceManager_->getSharedDriverState();
 }
 
-AxisRuntimeStatus LifecycleDriverOps::evaluateAxisReadiness(
+AxisReadiness LifecycleDriverOps::evaluateAxisReadiness(
     const SharedDriverState::AxisKey &axisKey,
     const SharedDriverState::AxisFeedbackState &feedback,
     const SharedDriverState::AxisCommandState *command,
@@ -147,7 +147,7 @@ AxisRuntimeStatus LifecycleDriverOps::evaluateAxisReadiness(
     const SharedDriverState::DeviceHealthState *deviceHealth) const
 {
     std::lock_guard<std::mutex> runtimeLock(axisRuntimeMutex_);
-    return axisRuntimes_[axisRuntimeMapKey(axisKey)].Evaluate(
+    return axisReadinessEvaluators_[axisReadinessMapKey(axisKey)].Evaluate(
         feedback, command, intent, deviceHealth);
 }
 
@@ -318,7 +318,7 @@ LifecycleDriverOps::Result LifecycleDriverOps::recoverAll() const
                                                                  commandPtr,
                                                                  AxisIntent::Recover,
                                                                  deviceHealthPtr);
-                    if (!AxisRuntime::RecoverConfirmed(readiness)) {
+                    if (!AxisReadinessEvaluator::RecoverConfirmed(readiness)) {
                         allHealthy = false;
                         break;
                     }
@@ -395,9 +395,9 @@ bool LifecycleDriverOps::motionHealthy(std::string *detail) const
                     commandPtr,
                     sharedState->getAxisIntent(axisKey),
                     deviceHealthPtr);
-                if (!AxisRuntime::ReadyForRun(readiness)) {
+                if (!AxisReadinessEvaluator::ReadyForRun(readiness)) {
                     if (detail) {
-                        *detail = AxisRuntime::DescribeBlockReason(readiness);
+                        *detail = AxisReadinessEvaluator::DescribeBlockReason(readiness);
                     }
                     return false;
                 }

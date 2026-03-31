@@ -1,6 +1,6 @@
 #include <gtest/gtest.h>
 
-#include "can_driver/AxisRuntime.h"
+#include "can_driver/AxisReadinessEvaluator.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/SharedDriverState.h"
 #include "can_driver/lifecycle_driver_ops.hpp"
@@ -223,11 +223,11 @@ std::vector<MotorActionExecutor::Target> makeTargets()
     };
 }
 
-TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
+TEST(AxisReadinessEvaluatorTest, PpAxisTransitionsFromEnabledToCommandingWhenFeedbackIsFresh)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
-    can_driver::AxisRuntime runtime;
+    can_driver::AxisReadinessEvaluator evaluator;
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     feedback.key = key;
@@ -242,11 +242,11 @@ TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
     deviceHealth.device = "fake1";
     deviceHealth.transportReady = true;
 
-    const auto armed = runtime.Evaluate(
+    const auto enabled = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(armed.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(armed));
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(armed));
+    EXPECT_EQ(enabled.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(enabled));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabled));
 
     command.valid = true;
     command.desiredMode = CanProtocol::MotorMode::Position;
@@ -254,18 +254,18 @@ TEST(AxisRuntimeTest, PpAxisTransitionsFromArmedToRunningWhenFeedbackIsFresh)
     feedback.mode = CanProtocol::MotorMode::Position;
     feedback.lastModeMatchSteadyNs = nowNs;
 
-    const auto running = runtime.Evaluate(
+    const auto commanding = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(running.state, can_driver::AxisRuntimeState::Running);
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(running));
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(running));
+    EXPECT_EQ(commanding.phase, can_driver::AxisReadinessPhase::Commanding);
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(commanding));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(commanding));
 }
 
-TEST(AxisRuntimeTest, PpAxisUsesSeenAndFaultedStatesForUnhealthyPaths)
+TEST(AxisReadinessEvaluatorTest, PpAxisUsesDegradedAndFaultActivePhasesForUnhealthyPaths)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
-    can_driver::AxisRuntime runtime;
+    can_driver::AxisReadinessEvaluator evaluator;
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     feedback.key = key;
@@ -280,28 +280,30 @@ TEST(AxisRuntimeTest, PpAxisUsesSeenAndFaultedStatesForUnhealthyPaths)
     deviceHealth.device = "fake1";
     deviceHealth.transportReady = true;
 
-    const auto seen = runtime.Evaluate(
+    const auto degraded = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(seen.state, can_driver::AxisRuntimeState::Seen);
-    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForEnable(seen));
-    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForRun(seen));
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(seen), "Feedback degraded.");
+    EXPECT_EQ(degraded.phase, can_driver::AxisReadinessPhase::Degraded);
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForEnable(degraded));
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForRun(degraded));
+    EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(degraded),
+              "Feedback degraded.");
 
     feedback.lastRxSteadyNs = nowNs;
     feedback.fault = true;
-    const auto faulted = runtime.Evaluate(
+    const auto faultActive = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(faulted.state, can_driver::AxisRuntimeState::Faulted);
-    EXPECT_FALSE(faulted.faultCleared);
-    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForEnable(faulted));
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(faulted), "Fault still active.");
+    EXPECT_EQ(faultActive.phase, can_driver::AxisReadinessPhase::FaultActive);
+    EXPECT_FALSE(faultActive.faultCleared);
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForEnable(faultActive));
+    EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(faultActive),
+              "Fault still active.");
 }
 
-TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
+TEST(AxisReadinessEvaluatorTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
-    can_driver::AxisRuntime runtime;
+    can_driver::AxisReadinessEvaluator evaluator;
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     feedback.key = key;
@@ -316,34 +318,34 @@ TEST(AxisRuntimeTest, RecoveringRequiresTwoFreshHealthyFeedbackSamples)
     deviceHealth.device = "fake1";
     deviceHealth.transportReady = true;
 
-    const auto firstRecovering = runtime.Evaluate(
+    const auto firstRecovering = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs);
-    EXPECT_EQ(firstRecovering.state, can_driver::AxisRuntimeState::Recovering);
-    EXPECT_FALSE(can_driver::AxisRuntime::RecoverConfirmed(firstRecovering));
+    EXPECT_EQ(firstRecovering.phase, can_driver::AxisReadinessPhase::Recovering);
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(firstRecovering));
 
-    const auto sameFrameRecovering = runtime.Evaluate(
+    const auto sameFrameRecovering = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Recover, &deviceHealth, nowNs + 1000000LL);
-    EXPECT_EQ(sameFrameRecovering.state, can_driver::AxisRuntimeState::Recovering);
-    EXPECT_FALSE(can_driver::AxisRuntime::RecoverConfirmed(sameFrameRecovering));
+    EXPECT_EQ(sameFrameRecovering.phase, can_driver::AxisReadinessPhase::Recovering);
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(sameFrameRecovering));
 
     feedback.lastRxSteadyNs = nowNs + 20000000LL;
     feedback.fault = false;
-    const auto recovered = runtime.Evaluate(
+    const auto recovered = evaluator.Evaluate(
         feedback,
         &command,
         can_driver::AxisIntent::Recover,
         &deviceHealth,
         feedback.lastRxSteadyNs);
-    EXPECT_EQ(recovered.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::RecoverConfirmed(recovered));
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(recovered));
+    EXPECT_EQ(recovered.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::RecoverConfirmed(recovered));
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(recovered));
 }
 
-TEST(AxisRuntimeTest, ArmedAxisStillRequiresSelectedModeToMatchBeforeRelease)
+TEST(AxisReadinessEvaluatorTest, EnabledAxisStillRequiresSelectedModeToMatchBeforeRelease)
 {
     const auto nowNs = can_driver::SharedDriverSteadyNowNs();
     const auto key = can_driver::MakeAxisKey("fake1", CanType::PP, static_cast<MotorID>(0x201));
-    can_driver::AxisRuntime runtime;
+    can_driver::AxisReadinessEvaluator evaluator;
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     feedback.key = key;
@@ -362,19 +364,20 @@ TEST(AxisRuntimeTest, ArmedAxisStillRequiresSelectedModeToMatchBeforeRelease)
     deviceHealth.device = "fake1";
     deviceHealth.transportReady = true;
 
-    const auto armedBlocked = runtime.Evaluate(
+    const auto enabledBlocked = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(armedBlocked.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForEnable(armedBlocked));
-    EXPECT_FALSE(can_driver::AxisRuntime::ReadyForRun(armedBlocked));
-    EXPECT_EQ(can_driver::AxisRuntime::DescribeBlockReason(armedBlocked), "Mode not ready.");
+    EXPECT_EQ(enabledBlocked.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForEnable(enabledBlocked));
+    EXPECT_FALSE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabledBlocked));
+    EXPECT_EQ(can_driver::AxisReadinessEvaluator::DescribeBlockReason(enabledBlocked),
+              "Mode not ready.");
 
     feedback.mode = CanProtocol::MotorMode::Velocity;
     feedback.lastModeMatchSteadyNs = nowNs;
-    const auto armedReady = runtime.Evaluate(
+    const auto enabledReady = evaluator.Evaluate(
         feedback, &command, can_driver::AxisIntent::Enable, &deviceHealth, nowNs);
-    EXPECT_EQ(armedReady.state, can_driver::AxisRuntimeState::Armed);
-    EXPECT_TRUE(can_driver::AxisRuntime::ReadyForRun(armedReady));
+    EXPECT_EQ(enabledReady.phase, can_driver::AxisReadinessPhase::Enabled);
+    EXPECT_TRUE(can_driver::AxisReadinessEvaluator::ReadyForRun(enabledReady));
 }
 
 TEST(LifecycleDriverOpsTest, EnableAllRollsBackSucceededMotorsOnPartialFailure)
@@ -522,7 +525,7 @@ TEST(LifecycleDriverOpsTest, AnyFaultActiveUsesSharedStateFeedback)
     EXPECT_TRUE(ops.anyFaultActive());
 }
 
-TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisRuntimeForPpModeMismatch)
+TEST(LifecycleDriverOpsTest, MotionHealthyUsesAxisReadinessForPpModeMismatch)
 {
     auto deviceManager = std::make_shared<FakeDeviceManager>();
     MotorActionExecutor executor(deviceManager);
@@ -635,7 +638,7 @@ TEST(LifecycleDriverOpsTest, MotionHealthyAcceptsFreshPpAxisBeforeFirstMotionCom
     EXPECT_TRUE(detail.empty());
 }
 
-TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisRuntimeRecoveryConfirmation)
+TEST(LifecycleDriverOpsTest, RecoverAllWaitsForAxisReadinessRecoveryConfirmation)
 {
     auto deviceManager = std::make_shared<FakeDeviceManager>();
     MotorActionExecutor executor(deviceManager);
