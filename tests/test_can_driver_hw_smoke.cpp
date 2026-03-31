@@ -249,8 +249,11 @@ private:
 
 class FakeDeviceManager : public IDeviceManager {
 public:
-    FakeDeviceManager()
-        : protocol_(std::make_shared<FakeProtocol>()), mutex_(std::make_shared<std::mutex>())
+    explicit FakeDeviceManager(bool exposeSharedState = false)
+        : protocol_(std::make_shared<FakeProtocol>())
+        , mutex_(std::make_shared<std::mutex>())
+        , sharedState_(std::make_shared<can_driver::SharedDriverState>())
+        , exposeSharedState_(exposeSharedState)
     {
     }
 
@@ -287,10 +290,11 @@ public:
     std::size_t deviceCount() const override { return 1; }
     std::shared_ptr<can_driver::SharedDriverState> getSharedDriverState() const override
     {
-        return nullptr;
+        return exposeSharedState_ ? sharedState_ : nullptr;
     }
 
     std::shared_ptr<FakeProtocol> protocol() const { return protocol_; }
+    std::shared_ptr<can_driver::SharedDriverState> sharedState() const { return sharedState_; }
     void setReady(bool ready)
     {
         std::lock_guard<std::mutex> lock(readyMutex_);
@@ -300,6 +304,8 @@ public:
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
+    std::shared_ptr<can_driver::SharedDriverState> sharedState_;
+    bool exposeSharedState_{false};
     mutable std::mutex readyMutex_;
     bool ready_{true};
 };
@@ -660,6 +666,64 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), expectedRaw);
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, CspReleaseRequiresSharedStateModeMatchBeforeRunning)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>(true);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_lifecycle"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    auto &coordinator = hw.operationalCoordinator();
+    const auto initResult = coordinator.RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    const auto axisKey = can_driver::MakeAxisKey("fake0", CanType::PP, static_cast<MotorID>(0x05));
+    fakeDm->sharedState()->mutateDeviceHealth(
+        "fake0",
+        [](can_driver::SharedDriverState::DeviceHealthState *health) {
+            health->transportReady = true;
+        });
+    fakeDm->sharedState()->mutateAxisCommand(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisCommandState *command) {
+            command->desiredMode = CanProtocol::MotorMode::CSP;
+            command->desiredModeValid = true;
+            command->valid = false;
+        });
+    fakeDm->sharedState()->setAxisIntent(axisKey, can_driver::AxisIntent::Enable);
+    fakeDm->sharedState()->mutateAxisFeedback(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->mode = CanProtocol::MotorMode::Position;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+
+    const auto blockedRelease = coordinator.RequestRelease();
+    EXPECT_FALSE(blockedRelease.ok);
+    EXPECT_EQ(blockedRelease.message, "Mode not ready.");
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+
+    fakeDm->sharedState()->mutateAxisFeedback(
+        axisKey,
+        [](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->mode = CanProtocol::MotorMode::CSP;
+            feedback->lastRxSteadyNs = can_driver::SharedDriverSteadyNowNs();
+        });
+
+    const auto releaseResult = coordinator.RequestRelease();
+    EXPECT_TRUE(releaseResult.ok) << releaseResult.message;
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Running);
 }
 
 } // namespace
