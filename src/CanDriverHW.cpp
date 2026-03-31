@@ -12,6 +12,19 @@
 #include <thread>
 #include <xmlrpcpp/XmlRpcValue.h>
 
+namespace {
+
+long long steadyAgeMs(std::int64_t stampNs)
+{
+    if (stampNs <= 0) {
+        return -1;
+    }
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    return (nowNs > stampNs) ? static_cast<long long>((nowNs - stampNs) / 1000000) : 0;
+}
+
+} // namespace
+
 CanDriverHW::CanDriverHW()
     : deviceManager_(std::make_shared<DeviceManager>())
 {
@@ -287,6 +300,75 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                           deviceFilter.c_str(),
                           timeout,
                           oss.str().c_str());
+            }
+
+            for (const std::size_t i : targetJointIndices) {
+                const auto &jc = joints_[i];
+                can_driver::SharedDriverState::AxisFeedbackState feedback;
+                const auto axisKey =
+                    can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
+                const bool hasFeedback = sharedState->getAxisFeedback(axisKey, &feedback);
+                if (!hasFeedback) {
+                    ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' has no shared feedback entry yet "
+                              "(device=%s protocol=%s motor_id=%u).",
+                              jc.name.c_str(),
+                              jc.canDevice.c_str(),
+                              (jc.protocol == CanType::MT) ? "MT" : "PP",
+                              static_cast<unsigned>(static_cast<std::uint16_t>(jc.motorId)));
+                    continue;
+                }
+
+                ROS_ERROR("[CanDriverHW] Startup sync detail: joint '%s' feedbackSeen=%s "
+                          "positionValid=%s velocityValid=%s currentValid=%s enabled=%s "
+                          "fault=%s timeoutCount=%u lastRxAgeMs=%lld rawPos=%lld rawVel=%d rawCur=%d mode=%d",
+                          jc.name.c_str(),
+                          feedback.feedbackSeen ? "true" : "false",
+                          feedback.positionValid ? "true" : "false",
+                          feedback.velocityValid ? "true" : "false",
+                          feedback.currentValid ? "true" : "false",
+                          feedback.enabled ? "true" : "false",
+                          feedback.fault ? "true" : "false",
+                          static_cast<unsigned>(feedback.consecutiveTimeoutCount),
+                          steadyAgeMs(feedback.lastRxSteadyNs),
+                          static_cast<long long>(feedback.position),
+                          static_cast<int>(feedback.velocity),
+                          static_cast<int>(feedback.current),
+                          static_cast<int>(feedback.mode));
+                }
+
+            if (const auto concreteDeviceManager =
+                    std::dynamic_pointer_cast<DeviceManager>(deviceManager_)) {
+                std::set<std::string> devicesToReport;
+                if (!deviceFilter.empty()) {
+                    devicesToReport.insert(deviceFilter);
+                } else {
+                    for (const std::size_t i : targetJointIndices) {
+                        devicesToReport.insert(joints_[i].canDevice);
+                    }
+                }
+
+                for (const auto &device : devicesToReport) {
+                    const auto transport = concreteDeviceManager->getTransport(device);
+                    if (!transport) {
+                        ROS_ERROR("[CanDriverHW] Startup sync transport detail: device '%s' has no transport instance.",
+                                  device.c_str());
+                        continue;
+                    }
+
+                    const auto stats = transport->snapshotStats();
+                    ROS_ERROR("[CanDriverHW] Startup sync transport detail on '%s': tx_ok=%llu "
+                              "tx_backpressure=%llu tx_link_down=%llu tx_error=%llu "
+                              "rx_ok=%llu rx_error=%llu rx_short=%llu last_rx_age_ms=%lld",
+                              device.c_str(),
+                              static_cast<unsigned long long>(stats.txOk),
+                              static_cast<unsigned long long>(stats.txBackpressure),
+                              static_cast<unsigned long long>(stats.txLinkUnavailable),
+                              static_cast<unsigned long long>(stats.txError),
+                              static_cast<unsigned long long>(stats.rxOk),
+                              static_cast<unsigned long long>(stats.rxError),
+                              static_cast<unsigned long long>(stats.rxShortRead),
+                              steadyAgeMs(stats.lastRxSteadyNs));
+                }
             }
             return false;
         }
