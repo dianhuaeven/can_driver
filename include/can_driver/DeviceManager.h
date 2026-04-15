@@ -4,10 +4,12 @@
 #include "can_driver/CanProtocol.h"
 #include "can_driver/CanType.h"
 #include "can_driver/EyouCan.h"
+#include "can_driver/EyouPhCan.h"
 #include "can_driver/IDeviceManager.h"
 #include "can_driver/MotorID.h"
 #include "can_driver/MtCan.h"
 #include "can_driver/SocketCanController.h"
+#include "can_driver/UdpCanTransport.h"
 
 #include <map>
 #include <memory>
@@ -55,12 +57,19 @@ public:
     std::size_t deviceCount() const override;
 
 private:
+    bool isUdpDevice(const std::string &device) const;
+    std::shared_ptr<CanTransport> getTransportBaseLocked(const std::string &device) const;
+    bool shutdownTransportLocked(const std::string &device);
+    bool initializeTransportLocked(const std::string &device, bool loopback);
+
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;
     // key = can device name（例如 can0/vcan0）。
-    std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
+    std::map<std::string, std::shared_ptr<SocketCanController>> canTransports_;
+    std::map<std::string, std::shared_ptr<UdpCanTransport>> udpTransports_;
     std::map<std::string, std::shared_ptr<MtCan>> mtProtocols_;
     std::map<std::string, std::shared_ptr<EyouCan>> eyouProtocols_;
+    std::map<std::string, std::shared_ptr<EyouPhCan>> phProtocols_;
     bool ppFastWriteEnabled_{false};
     // 每个设备一把命令互斥锁，避免多个控制线程并发下发命令时互相打断。
     std::map<std::string, std::shared_ptr<std::mutex>> deviceCmdMutexes_;

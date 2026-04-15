@@ -9,7 +9,8 @@
  */
 enum class CanType {
     MT, ///< 雷赛 MT 协议
-    PP  ///< Eyou PP 协议
+    PP, ///< Eyou PP 协议
+    PH  ///< 摆臂 Eyou PH（CANopen over UDP）协议
 };
 
 #endif // PROTOCOLTYPE_H

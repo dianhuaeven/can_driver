@@ -4,6 +4,7 @@
 #include "can_driver/MtCan.h"
 
 #include <array>
+#include <cstdlib>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -50,6 +51,7 @@ protected:
     static void SetUpTestSuite()
     {
         ros::Time::init();
+        setenv("CAN_DRIVER_MT_USE_MIT_POSITION", "0", 1);
     }
 
     MtCanTest()
@@ -125,6 +127,28 @@ TEST_F(MtCanTest, SetPositionWithoutVelocityUsesDefaultSpeed)
     EXPECT_EQ(frame.data[3], 0u);
 }
 
+TEST_F(MtCanTest, PositionModeUsesMitFrameWhenEnabled)
+{
+    setenv("CAN_DRIVER_MT_USE_MIT_POSITION", "1", 1);
+    auto mitTransport = std::make_shared<MockTransport>();
+    MtCan mit(mitTransport);
+
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x02);
+    constexpr int32_t kPositionRaw = 0; // 0.01° -> 0 rad
+    ASSERT_TRUE(mit.setPosition(kMotorId, kPositionRaw));
+    ASSERT_EQ(mitTransport->sentFrames.size(), 1u);
+
+    const auto &frame = mitTransport->sentFrames[0];
+    EXPECT_EQ(frame.id, 0x402u);
+    EXPECT_EQ(frame.dlc, 8u);
+    // p=0rad 映射到中点，约 0x7FFF/0x8000；这里容忍 ±1。
+    const uint16_t p_u16 =
+        static_cast<uint16_t>((static_cast<uint16_t>(frame.data[0]) << 8) | frame.data[1]);
+    EXPECT_NEAR(static_cast<double>(p_u16), 32768.0, 1.0);
+
+    setenv("CAN_DRIVER_MT_USE_MIT_POSITION", "0", 1);
+}
+
 TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 {
     // 响应 CAN ID=0x240+nodeId，nodeId=1 -> CAN ID 0x241。
@@ -190,6 +214,37 @@ TEST_F(MtCanTest, GetPositionPreservesLargeMultiTurnAngle)
     transport->simulateReceive(frame);
 
     EXPECT_EQ(mt.getPosition(kResponseNodeId), 2147483648LL);
+}
+
+TEST_F(MtCanTest, HandleMitResponseParsesPositionAndVelocity)
+{
+    setenv("CAN_DRIVER_MT_USE_MIT_POSITION", "1", 1);
+    auto mitTransport = std::make_shared<MockTransport>();
+    MtCan mit(mitTransport);
+
+    constexpr MotorID kResponseNodeId = static_cast<MotorID>(0x01);
+
+    // MIT 回包：p=中点(约0rad)、v=中点(约0rad/s)、t=中点(约0Nm)
+    CanTransport::Frame frame {};
+    frame.id = 0x501;
+    frame.dlc = 8;
+    frame.isExtended = false;
+    frame.isRemoteRequest = false;
+    frame.data[0] = 0x01;
+    frame.data[1] = 0x80;
+    frame.data[2] = 0x00;
+    frame.data[3] = 0x80;
+    frame.data[4] = 0x08;
+    frame.data[5] = 0x00;
+    frame.data[6] = 0x00;
+    frame.data[7] = 0x00;
+
+    mitTransport->simulateReceive(frame);
+
+    EXPECT_NEAR(static_cast<double>(mit.getPosition(kResponseNodeId)), 0.0, 5.0);
+    EXPECT_NEAR(static_cast<double>(mit.getVelocity(kResponseNodeId)), 0.0, 5.0);
+
+    setenv("CAN_DRIVER_MT_USE_MIT_POSITION", "0", 1);
 }
 
 TEST_F(MtCanTest, EnableDisableAndFaultStateAreObservable)

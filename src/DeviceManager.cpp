@@ -2,50 +2,119 @@
 
 #include <ros/ros.h>
 
+namespace {
+constexpr const char *kUdpPrefix = "udp://";
+}
+
+bool DeviceManager::isUdpDevice(const std::string &device) const
+{
+    return device.rfind(kUdpPrefix, 0) == 0;
+}
+
+std::shared_ptr<CanTransport> DeviceManager::getTransportBaseLocked(const std::string &device) const
+{
+    auto canIt = canTransports_.find(device);
+    if (canIt != canTransports_.end()) {
+        return std::static_pointer_cast<CanTransport>(canIt->second);
+    }
+    auto udpIt = udpTransports_.find(device);
+    if (udpIt != udpTransports_.end()) {
+        return std::static_pointer_cast<CanTransport>(udpIt->second);
+    }
+    return nullptr;
+}
+
+bool DeviceManager::shutdownTransportLocked(const std::string &device)
+{
+    auto canIt = canTransports_.find(device);
+    if (canIt != canTransports_.end() && canIt->second) {
+        canIt->second->shutdown();
+        return true;
+    }
+    auto udpIt = udpTransports_.find(device);
+    if (udpIt != udpTransports_.end() && udpIt->second) {
+        udpIt->second->shutdown();
+        return true;
+    }
+    return false;
+}
+
+bool DeviceManager::initializeTransportLocked(const std::string &device, bool loopback)
+{
+    if (isUdpDevice(device)) {
+        auto it = udpTransports_.find(device);
+        if (it == udpTransports_.end()) {
+            auto transport = std::make_shared<UdpCanTransport>();
+            if (!transport->initialize(device)) {
+                ROS_ERROR("[CanDriverHW] Failed to initialize UDP device '%s'.", device.c_str());
+                return false;
+            }
+            udpTransports_[device] = transport;
+        } else if (!it->second->initialize(device)) {
+            ROS_ERROR("[CanDriverHW] Failed to re-initialize UDP device '%s'.", device.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    auto it = canTransports_.find(device);
+    if (it == canTransports_.end()) {
+        auto transport = std::make_shared<SocketCanController>();
+        if (!transport->initialize(device, loopback)) {
+            ROS_ERROR("[CanDriverHW] Failed to initialize CAN device '%s'.", device.c_str());
+            return false;
+        }
+        canTransports_[device] = transport;
+    } else if (!it->second->initialize(device, loopback)) {
+        ROS_ERROR("[CanDriverHW] Failed to re-initialize CAN device '%s'.", device.c_str());
+        return false;
+    }
+    return true;
+}
+
 // 幂等创建 transport：同一 device 只创建一次。
 bool DeviceManager::ensureTransport(const std::string &device, bool loopback)
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    auto it = transports_.find(device);
-    if (it != transports_.end()) {
+    if (getTransportBaseLocked(device)) {
         return true;
     }
 
-    // 创建底层 SocketCAN 传输并尝试初始化。
-    auto transport = std::make_shared<SocketCanController>();
-    if (!transport->initialize(device, loopback)) {
-        ROS_ERROR("[CanDriverHW] Failed to initialize CAN device '%s'.", device.c_str());
+    if (!initializeTransportLocked(device, loopback)) {
         return false;
     }
-
-    transports_[device] = transport;
     // 同步创建该设备的命令互斥锁，供上层 write() 串行下发命令使用。
     deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
-    ROS_INFO("[CanDriverHW] Opened CAN device '%s'.", device.c_str());
+    ROS_INFO("[CanDriverHW] Opened device '%s'.", device.c_str());
     return true;
 }
 
 bool DeviceManager::ensureProtocol(const std::string &device, CanType type)
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
-    auto transportIt = transports_.find(device);
+    auto transport = getTransportBaseLocked(device);
     // protocol 依赖 transport，未就绪直接失败。
-    if (transportIt == transports_.end()) {
+    if (!transport) {
         return false;
     }
-    auto transport = transportIt->second;
 
     // 按协议类型按需懒加载实例。
     if (type == CanType::MT) {
         if (mtProtocols_.find(device) == mtProtocols_.end()) {
             mtProtocols_[device] = std::make_shared<MtCan>(transport);
         }
-    } else {
+    } else if (type == CanType::PP) {
         if (eyouProtocols_.find(device) == eyouProtocols_.end()) {
             auto eyou = std::make_shared<EyouCan>(transport);
             eyou->setFastWriteEnabled(ppFastWriteEnabled_);
             eyouProtocols_[device] = std::move(eyou);
         }
+    } else if (type == CanType::PH) {
+        if (phProtocols_.find(device) == phProtocols_.end()) {
+            phProtocols_[device] = std::make_shared<EyouPhCan>(transport);
+        }
+    } else {
+        return false;
     }
     return true;
 }
@@ -56,23 +125,24 @@ bool DeviceManager::initDevice(const std::string &device,
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     // 已存在 transport 时先 shutdown 再 re-init，确保监听器和内部状态被重置。
-    auto transportIt = transports_.find(device);
-    if (transportIt == transports_.end()) {
-        auto transport = std::make_shared<SocketCanController>();
-        if (!transport->initialize(device, loopback)) {
+    if (!getTransportBaseLocked(device)) {
+        if (!initializeTransportLocked(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Failed to init '%s'.", device.c_str());
             return false;
         }
-        transports_[device] = transport;
         deviceCmdMutexes_[device] = std::make_shared<std::mutex>();
-        transportIt = transports_.find(device);
     } else {
-        const auto &transport = transportIt->second;
-        transport->shutdown();
-        if (!transport->initialize(device, loopback)) {
+        shutdownTransportLocked(device);
+        if (!initializeTransportLocked(device, loopback)) {
             ROS_ERROR("[CanDriverHW] Re-init of '%s' failed.", device.c_str());
             return false;
         }
+    }
+
+    auto transport = getTransportBaseLocked(device);
+    if (!transport) {
+        ROS_ERROR("[CanDriverHW] Transport unavailable for '%s'.", device.c_str());
+        return false;
     }
 
     if (deviceCmdMutexes_.find(device) == deviceCmdMutexes_.end()) {
@@ -82,27 +152,36 @@ bool DeviceManager::initDevice(const std::string &device,
     // 按协议拆分电机列表，避免不必要地创建协议实例。
     std::vector<MotorID> mtIds;
     std::vector<MotorID> ppIds;
+    std::vector<MotorID> phIds;
     for (const auto &entry : motors) {
         if (entry.first == CanType::MT) {
             mtIds.push_back(entry.second);
-        } else {
+        } else if (entry.first == CanType::PP) {
             ppIds.push_back(entry.second);
+        } else if (entry.first == CanType::PH) {
+            phIds.push_back(entry.second);
         }
     }
     // 初始化协议对象并启动状态刷新任务。
     if (!mtIds.empty() && mtProtocols_.find(device) == mtProtocols_.end()) {
-        mtProtocols_[device] = std::make_shared<MtCan>(transportIt->second);
+        mtProtocols_[device] = std::make_shared<MtCan>(transport);
     }
     if (!ppIds.empty() && eyouProtocols_.find(device) == eyouProtocols_.end()) {
-        auto eyou = std::make_shared<EyouCan>(transportIt->second);
+        auto eyou = std::make_shared<EyouCan>(transport);
         eyou->setFastWriteEnabled(ppFastWriteEnabled_);
         eyouProtocols_[device] = std::move(eyou);
+    }
+    if (!phIds.empty() && phProtocols_.find(device) == phProtocols_.end()) {
+        phProtocols_[device] = std::make_shared<EyouPhCan>(transport);
     }
     if (!mtIds.empty()) {
         mtProtocols_[device]->initializeMotorRefresh(mtIds);
     }
     if (!ppIds.empty()) {
         eyouProtocols_[device]->initializeMotorRefresh(ppIds);
+    }
+    if (!phIds.empty()) {
+        phProtocols_[device]->initializeMotorRefresh(phIds);
     }
 
     ROS_INFO("[CanDriverHW] Initialized '%s'.", device.c_str());
@@ -123,9 +202,14 @@ void DeviceManager::startRefresh(const std::string &device,
         if (it != mtProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
         }
-    } else {
+    } else if (type == CanType::PP) {
         auto it = eyouProtocols_.find(device);
         if (it != eyouProtocols_.end()) {
+            it->second->initializeMotorRefresh(ids);
+        }
+    } else if (type == CanType::PH) {
+        auto it = phProtocols_.find(device);
+        if (it != phProtocols_.end()) {
             it->second->initializeMotorRefresh(ids);
         }
     }
@@ -140,6 +224,11 @@ void DeviceManager::setRefreshRateHz(double hz)
         }
     }
     for (auto &kv : eyouProtocols_) {
+        if (kv.second) {
+            kv.second->setRefreshRateHz(hz);
+        }
+    }
+    for (auto &kv : phProtocols_) {
         if (kv.second) {
             kv.second->setRefreshRateHz(hz);
         }
@@ -163,10 +252,17 @@ void DeviceManager::shutdownAll()
     // 先释放协议（包含内部线程/handler），再关闭 transport。
     mtProtocols_.clear();
     eyouProtocols_.clear();
-    for (auto &kv : transports_) {
+    phProtocols_.clear();
+
+    for (auto &kv : canTransports_) {
         kv.second->shutdown();
     }
-    transports_.clear();
+    for (auto &kv : udpTransports_) {
+        kv.second->shutdown();
+    }
+
+    canTransports_.clear();
+    udpTransports_.clear();
     deviceCmdMutexes_.clear();
 }
 
@@ -178,9 +274,14 @@ std::shared_ptr<CanProtocol> DeviceManager::getProtocol(const std::string &devic
         if (it != mtProtocols_.end()) {
             return std::static_pointer_cast<CanProtocol>(it->second);
         }
-    } else {
+    } else if (type == CanType::PP) {
         auto it = eyouProtocols_.find(device);
         if (it != eyouProtocols_.end()) {
+            return std::static_pointer_cast<CanProtocol>(it->second);
+        }
+    } else if (type == CanType::PH) {
+        auto it = phProtocols_.find(device);
+        if (it != phProtocols_.end()) {
             return std::static_pointer_cast<CanProtocol>(it->second);
         }
     }
@@ -197,22 +298,27 @@ std::shared_ptr<std::mutex> DeviceManager::getDeviceMutex(const std::string &dev
 std::shared_ptr<SocketCanController> DeviceManager::getTransport(const std::string &device) const
 {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    auto it = transports_.find(device);
-    return (it != transports_.end()) ? it->second : nullptr;
+    auto it = canTransports_.find(device);
+    return (it != canTransports_.end()) ? it->second : nullptr;
 }
 
 bool DeviceManager::isDeviceReady(const std::string &device) const
 {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    auto it = transports_.find(device);
-    if (it == transports_.end() || !it->second) {
-        return false;
+    auto canIt = canTransports_.find(device);
+    if (canIt != canTransports_.end() && canIt->second) {
+        return canIt->second->isReady();
     }
-    return it->second->isReady();
+
+    auto udpIt = udpTransports_.find(device);
+    if (udpIt != udpTransports_.end() && udpIt->second) {
+        return udpIt->second->isReady();
+    }
+    return false;
 }
 
 std::size_t DeviceManager::deviceCount() const
 {
     std::shared_lock<std::shared_mutex> lock(mutex_);
-    return transports_.size();
+    return canTransports_.size() + udpTransports_.size();
 }

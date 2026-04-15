@@ -1,0 +1,15 @@
+# PH 电机控制配置（多车区分）
+# 用于 scripts/ph_motor_interface.py
+
+profiles:
+  car_a:
+    description: "车辆A（默认摆臂网关）"
+    driver_ns: "/can_driver_node"
+    can_device: "udp://7101@192.168.1.253:1031"
+    ph_motor_ids: [0x601, 0x602, 0x603, 0x604]
+
+  car_b:
+    description: "车辆B（示例，请按现场网络修改）"
+    driver_ns: "/can_driver_node"
+    can_device: "udp://7101@192.168.2.253:1031"
+    ph_motor_ids: [0x601, 0x602, 0x603, 0x604]

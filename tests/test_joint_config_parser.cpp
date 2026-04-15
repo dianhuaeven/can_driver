@@ -186,6 +186,19 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 1.0);
 }
 
+TEST(JointConfigParser, ParseSupportsPhProtocolAliases)
+{
+    XmlRpc::XmlRpcValue motorId(0x601);
+    auto joint = makeJointBase("swing_arm_left", motorId, "SWINGARM");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].protocol, CanType::PH);
+}
+
 TEST(JointConfigParser, ParseReadsExplicitScales)
 {
     XmlRpc::XmlRpcValue motorId(8);

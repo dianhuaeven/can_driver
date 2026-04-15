@@ -5,6 +5,9 @@ ROS1 `hardware_interface::RobotHW` implementation for SocketCAN motor control.
 Supported protocols:
 - `MT`
 - `PP` (Eyou)
+- `PH` (swingarm, CANopen over UDP)
+
+MT position mode now supports MIT command (`0x400 + ID`) by default.
 
 ## Build
 
@@ -46,4 +49,6 @@ roslaunch can_driver can_driver.launch
 - `docs/CAN帧测试方案.md`
 - `docs/测试计划.md`
 - `docs/单电机控制说明.md`
+- `docs/摆臂UDP接入说明.md`
+- `docs/MT_MIT模式接入说明.md`
 - `docs/归档/代码结构重构报告_2026-03-03.md`

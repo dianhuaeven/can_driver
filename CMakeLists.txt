@@ -142,7 +142,9 @@ add_library(can_driver_transport
   src/JointConfigParser.cpp
   src/MtCan.cpp
   src/EyouCan.cpp
+  src/EyouPhCan.cpp
   src/SocketCanController.cpp
+  src/UdpCanTransport.cpp
   src/SafeCommand.cpp
   src/CanDriverHW.cpp
 )
@@ -175,6 +177,8 @@ target_link_libraries(can_driver_node
 ## in contrast to setup.py, you can choose the destination
 catkin_install_python(PROGRAMS
   scripts/realtime_motor_ui.py
+  scripts/ph_motor_interface.py
+  scripts/mt_motor_interface.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
@@ -347,6 +351,26 @@ if(CATKIN_ENABLE_TESTING)
       )
     else()
       target_link_libraries(test_eyou_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}
+      )
+    endif()
+  endif()
+
+  catkin_add_gtest(test_eyou_ph_can_protocol
+    tests/test_eyou_ph_can_protocol.cpp
+  )
+  if(TARGET test_eyou_ph_can_protocol)
+    target_include_directories(test_eyou_ph_can_protocol PRIVATE include ${GTEST_INCLUDE_DIRS})
+    if (TARGET GTest::GTest)
+      target_link_libraries(test_eyou_ph_can_protocol
+        can_driver_transport
+        ${catkin_LIBRARIES}
+        GTest::GTest GTest::Main
+      )
+    else()
+      target_link_libraries(test_eyou_ph_can_protocol
         can_driver_transport
         ${catkin_LIBRARIES}
         ${GTEST_LIBRARIES} ${GTEST_MAIN_LIBRARIES}

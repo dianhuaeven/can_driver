@@ -422,11 +422,14 @@ void CanDriverHW::startMotorRefreshThreads()
 
     std::map<std::string, std::vector<MotorID>> mtIds;
     std::map<std::string, std::vector<MotorID>> ppIds;
+    std::map<std::string, std::vector<MotorID>> phIds;
     for (const auto &jc : joints_) {
         if (jc.protocol == CanType::MT) {
             mtIds[jc.canDevice].push_back(jc.motorId);
-        } else {
+        } else if (jc.protocol == CanType::PP) {
             ppIds[jc.canDevice].push_back(jc.motorId);
+        } else if (jc.protocol == CanType::PH) {
+            phIds[jc.canDevice].push_back(jc.motorId);
         }
     }
     for (auto &kv : mtIds) {
@@ -434,6 +437,9 @@ void CanDriverHW::startMotorRefreshThreads()
     }
     for (auto &kv : ppIds) {
         deviceManager_->startRefresh(kv.first, CanType::PP, kv.second);
+    }
+    for (auto &kv : phIds) {
+        deviceManager_->startRefresh(kv.first, CanType::PH, kv.second);
     }
 }
 
@@ -1081,6 +1087,7 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
             res.message = "CMD_SET_MODE value must be 0 or 1.";
             return true;
         }
+        const bool toVelocity = (req.value == 1.0);
         const auto mode = (req.value == 0.0)
                               ? CanProtocol::MotorMode::Position
                               : CanProtocol::MotorMode::Velocity;
@@ -1094,6 +1101,30 @@ bool CanDriverHW::onMotorCommand(can_driver::MotorCommand::Request &req,
             handleFailure(status, "Set mode command rejected.");
             return true;
         }
+
+        // 关键：同时切换 HW 层运行时控制路由。
+        // 否则即便协议层 setMode 成功，write() 仍会按 YAML 初始 controlMode
+        // 选择 setVelocity/setPosition，导致“mode 成功但不动”。
+        {
+            std::lock_guard<std::mutex> lock(jointStateMutex_);
+            for (auto &jc : joints_) {
+                if (static_cast<uint16_t>(jc.motorId) != req.motor_id) {
+                    continue;
+                }
+                jc.controlMode = toVelocity ? "velocity" : "position";
+                jc.hasDirectPosCmd = false;
+                jc.hasDirectVelCmd = false;
+                if (toVelocity) {
+                    jc.directVelCmd = 0.0;
+                    jc.velCmd = 0.0;
+                } else {
+                    jc.directPosCmd = jc.pos;
+                    jc.posCmd = jc.pos;
+                }
+                break;
+            }
+        }
+
         res.success = true;
         res.message = "OK";
         return true;

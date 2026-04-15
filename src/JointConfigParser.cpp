@@ -96,8 +96,11 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
             jc.protocol = CanType::MT;
         } else if (protoStr == "PP") {
             jc.protocol = CanType::PP;
+        } else if (protoStr == "PH" || protoStr == "PH_UDP" || protoStr == "SWINGARM") {
+            jc.protocol = CanType::PH;
         } else {
-            errorMsg = "Joint '" + jc.name + "': unknown protocol '" + protoStr + "' (use MT or PP).";
+            errorMsg = "Joint '" + jc.name + "': unknown protocol '" + protoStr +
+                       "' (use MT, PP, or PH).";
             return false;
         }
 

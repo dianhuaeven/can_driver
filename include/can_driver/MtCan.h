@@ -125,7 +125,17 @@ private:
         uint16_t encoderPosition = 0; ///< 单圈编码器位置
         bool enabled = false;
         bool error = false;
+        bool mitModePrimed = false;
+        uint8_t runMode = 0; ///< 0x01电流环, 0x02速度环, 0x03位置环
         MotorMode mode = MotorMode::Velocity;
+    };
+
+    struct MitCommand {
+        double positionRad = 0.0; // p_des
+        double velocityRadPerSec = 0.0; // v_des
+        double kp = 10.0;
+        double kd = 1.0;
+        double torqueNm = 0.0; // t_ff
     };
 
     std::shared_ptr<CanTransport> canController;
@@ -137,6 +147,13 @@ private:
     std::atomic<bool> refreshLoopActive {false};
     std::thread refreshThread;
     std::atomic<double> refreshRateHz_{0.0};
+    bool mtPositionUseMit_ = true;
+    bool mtDebugMit_ = true;
+    // 现场默认值：10/1 常偏软，重载下位置模式不明显。
+    // 提升到更实用的默认刚度，并给一个小前馈力矩克服静摩擦，仍可通过环境变量覆盖。
+    double mitDefaultKp_ = 80.0;
+    double mitDefaultKd_ = 2.5;
+    double mitDefaultTorqueNm_ = 0.8;
 
     /**
      * @brief 将节点 ID 组合成 CAN ID（高位取 canBaseId，高 8 位 + motorId）
@@ -155,9 +172,17 @@ private:
      */
     void requestError(uint8_t motorId) const;
     /**
+     * @brief 触发读取系统运行模式（0x70）
+     */
+    void requestRunMode(uint8_t motorId) const;
+    /**
      * @brief 触发读多圈角度命令（0x92）
      */
     void requestMultiTurnAngle(uint8_t motorId) const;
+    /**
+     * @brief 发送 A4 位置保持命令，强制驱动切入位置环（runmode=0x03）
+     */
+    void sendA4PositionHoldRaw(uint8_t motorId, int32_t positionRaw, uint16_t maxSpeedDps) const;
     /**
      * @brief 复位系统（0x76）
      */
@@ -168,6 +193,9 @@ private:
     void setZeroPosition(uint8_t motorId) const;
     void refreshMotorStates();
     void stopRefreshLoop();
+    bool sendMitPositionCommand(uint16_t motorIdRaw, uint8_t nodeId, int32_t positionRaw);
+    void sendMitFrame(uint16_t mitCanId, const MitCommand &cmd) const;
+    void loadMitConfigFromEnv();
     /**
      * @brief 通用加减速写入（0x43）
      */
