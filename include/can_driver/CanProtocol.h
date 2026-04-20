@@ -39,7 +39,14 @@ public:
      * @param motorId 目标电机 ID
      * @param velocity 协议规定的速度值（单位由协议决定）
      *
-     * 上层只需给出逻辑速度值，具体缩放和单位转换由派生类处理。
+     * 说明：
+     * - 该接口参数本身仍是“协议/后端内部单位”的整数值；
+     * - 在 can_driver 标准硬件链路里，上游控制器与 direct topic 一般使用 SI 语义
+     *   （速度用 rad/s，位置用 rad）；
+     * - CanDriverHW 会先按 joint 的 velocity_scale / position_scale 把 SI 值换算成
+     *   协议整数值，再调用具体协议后端。
+     *
+     * 因此，这里的 velocity 不是用户直接输入的 Float64 速度值，而是经过缩放后的内部值。
      */
     virtual bool setVelocity(MotorID motorId, int32_t velocity) = 0;
 

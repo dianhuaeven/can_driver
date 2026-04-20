@@ -33,6 +33,16 @@ constexpr std::uint32_t kDamiaoVelocityModeValue = 3u;
 constexpr float kDamiaoDefaultPMax = 12.5f;
 constexpr float kDamiaoDefaultVMax = 45.0f;
 constexpr float kDamiaoDefaultTMax = 18.0f;
+// Damiao 后端在线上发送/接收的是 SI 物理量：
+// - 速度命令帧 data[0..3] 为 float32(rad/s)
+// - 反馈帧中的位置/速度/力矩字段按协议范围映射为 rad / rad/s / Nm
+//
+// 但 can_driver 内部仍统一缓存为“定点 SI”整数，便于与其余协议共用
+// SharedDriverState / CanProtocol 抽象：
+// - 位置: 1 raw = 1e-4 rad
+// - 速度: 1 raw = 1e-4 rad/s
+//
+// 这个缩放只存在于驱动内部，不等同于编码器脉冲，也不包含减速比语义。
 constexpr double kDamiaoProtocolScale = 1e-4;
 const auto kDamiaoRegisterAckTimeout = std::chrono::milliseconds(100);
 const auto kDamiaoFeedbackStateTimeout = std::chrono::milliseconds(100);
@@ -113,11 +123,15 @@ bool DamiaoCan::setVelocity(MotorID motorId, int32_t velocity)
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto &state = motorStates_[nodeId];
+        // 注意：这里缓存的 velocity 仍是 can_driver 内部定点 SI 整数，
+        // 不是达妙总线上直接发送的 float32。
         state.commandedVelocity = velocity;
         state.mode = MotorMode::Velocity;
     }
     syncSharedCommand(nodeId, velocity, true);
     syncSharedIntent(nodeId, can_driver::AxisIntent::Run);
+    // 达妙速度帧在线上要求的是 float32 rad/s，
+    // 因此这里要先把内部整数刻度还原成 SI 速度后再打包。
     return sendSpeedFrame(nodeId,
                           rawToVelocityRadPerSec(velocity),
                           CanTxDispatcher::Category::Control,
@@ -392,6 +406,8 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto &state = motorStates_[motorId];
+        // 反馈帧先按协议范围还原到 SI，
+        // 再转换回 can_driver 内部统一的定点 SI 整数缓存。
         state.position = rawPositionFromRadians(positionRad);
         state.velocity = rawVelocityFromRadiansPerSec(velocityRadPerSec);
         state.current = rawTorqueFromNewtonMeters(torqueNm);

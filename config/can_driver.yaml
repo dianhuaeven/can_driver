@@ -148,6 +148,13 @@ can_driver_node:
 
     # --- 底盘履带关节（DM 协议，速度模式）---
     # 达妙履带只作为 velocity 语义关节接入，由协议后端自行决定具体报文格式。
+    # 硬件信息：输出轴 14 位编码器，对应 16384 脉冲/圈。
+    # 上层接口语义：
+    # - 速度命令 topic / 控制器输入按 rad/s 使用
+    # - 当前 DamiaoCan 在线上发送的是 float32(rad/s)
+    # 注意：当前 DamiaoCan 后端内部使用 SI 粒度（1e-4 rad / rad/s）做命令与反馈换算，
+    # 这里不要直接把 position_scale / velocity_scale 改成 16384，
+    # 否则会连同速度命令换算一起改变，导致 DM 控制量失真。
 
     - name: left_front_wheel_joint
       motor_id: 0x01
