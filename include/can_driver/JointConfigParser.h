@@ -6,6 +6,7 @@
 
 #include <xmlrpcpp/XmlRpcValue.h>
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -20,6 +21,7 @@ struct ParsedJointConfig {
     std::string controlMode; ///< 控制模式字符串（position/velocity）
     MotorID motorId{MotorID::LeftWheel}; ///< 电机 ID
     CanType protocol{CanType::MT};       ///< 协议类型
+    std::uint32_t dmMasterId{0};         ///< DM 协议反馈使用的 Master ID
     double positionScale{1.0};           ///< 位置单位换算比例
     double velocityScale{1.0};           ///< 速度单位换算比例
     double directionSign{1.0};           ///< 方向修正，仅允许 1 或 -1

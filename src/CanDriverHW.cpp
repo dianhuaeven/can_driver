@@ -587,6 +587,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
     std::set<std::string> seenJointNames;
     std::set<uint16_t> seenMotorIds;
     std::set<std::tuple<std::string, CanType, std::uint8_t>> seenProtocolNodes;
+    std::set<std::pair<std::string, std::uint32_t>> seenDmMasterIds;
     for (const auto &p : parsed) {
         const std::string &jointName = p.name;
         const uint16_t motorId = static_cast<uint16_t>(p.motorId);
@@ -612,6 +613,14 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
                       protocolDisplayName(p.protocol));
             return false;
         }
+        if (p.protocol == CanType::DM &&
+            !seenDmMasterIds.emplace(p.canDevice, p.dmMasterId).second) {
+            ROS_ERROR("[CanDriverHW] Duplicate DM master_id=0x%03X on device '%s'. "
+                      "Each DM joint on the same SocketCAN device must use a unique feedback frame ID.",
+                      static_cast<unsigned>(p.dmMasterId),
+                      p.canDevice.c_str());
+            return false;
+        }
 
         JointConfig jc;
         jc.name = p.name;
@@ -619,6 +628,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.controlMode = p.controlMode;
         jc.motorId = p.motorId;
         jc.protocol = p.protocol;
+        jc.dmMasterId = p.dmMasterId;
         jc.positionScale = p.positionScale;
         jc.velocityScale = p.velocityScale;
         jc.directionSign = p.directionSign;
@@ -1365,6 +1375,19 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
     const bool ok = deviceManager_->initDevice(device, motors, loopback);
     if (!ok) {
         return false;
+    }
+
+    const auto dmBaseProto = deviceManager_->getProtocol(device, CanType::DM);
+    const auto dmProto = std::dynamic_pointer_cast<DamiaoCan>(dmBaseProto);
+    for (const auto &jc : joints_) {
+        if (jc.canDevice != device || jc.protocol != CanType::DM) {
+            continue;
+        }
+        if (!dmProto) {
+            ROS_ERROR("[CanDriverHW] DM protocol cast failed on '%s'.", jc.canDevice.c_str());
+            return false;
+        }
+        dmProto->setMotorMasterId(jc.motorId, jc.dmMasterId);
     }
 
     for (const auto &jc : joints_) {

@@ -97,6 +97,49 @@ bool parseDirectionSign(const XmlRpc::XmlRpcValue &jointValue,
     return true;
 }
 
+bool parseOptionalCanStdId(const XmlRpc::XmlRpcValue &jointValue,
+                           const char *fieldName,
+                           const std::string &jointName,
+                           std::uint32_t *out,
+                           std::string &errorMsg)
+{
+    if (!jointValue.hasMember(fieldName)) {
+        return true;
+    }
+
+    std::uint32_t parsed = 0;
+    const auto &value = jointValue[fieldName];
+    if (value.getType() == XmlRpc::XmlRpcValue::TypeInt) {
+        const auto intValue = static_cast<int>(value);
+        if (intValue < 0) {
+            errorMsg = "Joint '" + jointName + "': invalid " + fieldName + ".";
+            return false;
+        }
+        parsed = static_cast<std::uint32_t>(intValue);
+    } else if (value.getType() == XmlRpc::XmlRpcValue::TypeString) {
+        try {
+            parsed = static_cast<std::uint32_t>(
+                std::stoul(static_cast<std::string>(value), nullptr, 0));
+        } catch (const std::exception &e) {
+            errorMsg = "Joint '" + jointName + "': invalid " + fieldName + " '" +
+                       static_cast<std::string>(value) + "' (" + e.what() + ").";
+            return false;
+        }
+    } else {
+        errorMsg = "Joint '" + jointName + "': " + fieldName + " must be int or string.";
+        return false;
+    }
+
+    if (parsed > 0x7FFu) {
+        errorMsg = "Joint '" + jointName + "': " + fieldName +
+                   " out of range [0, 0x7FF].";
+        return false;
+    }
+
+    *out = parsed;
+    return true;
+}
+
 } // namespace
 
 // 支持 int 或 string（十进制/十六进制）两种配置形式。
@@ -181,6 +224,9 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         }
 
         if (!parseMotorId(jv["motor_id"], jc.name, jc.motorId, errorMsg)) {
+            return false;
+        }
+        if (!parseOptionalCanStdId(jv, "master_id", jc.name, &jc.dmMasterId, errorMsg)) {
             return false;
         }
 

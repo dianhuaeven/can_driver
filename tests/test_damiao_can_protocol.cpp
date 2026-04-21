@@ -136,10 +136,11 @@ float decodeFloatLE(const CanTransport::Frame &frame)
 
 CanTransport::Frame makeRegisterAck(std::uint8_t motorId,
                                     std::uint8_t registerId,
-                                    std::uint32_t value)
+                                    std::uint32_t value,
+                                    std::uint32_t frameId = 0x000u)
 {
     CanTransport::Frame frame {};
-    frame.id = 0x000u;
+    frame.id = frameId;
     frame.isExtended = false;
     frame.isRemoteRequest = false;
     frame.dlc = 8;
@@ -159,10 +160,11 @@ CanTransport::Frame makeFeedbackFrame(std::uint8_t motorId,
                                       std::uint8_t state,
                                       std::uint16_t positionRaw = 0x8000u,
                                       std::uint16_t velocityRaw = 0x0800u,
-                                      std::uint16_t torqueRaw = 0x0800u)
+                                      std::uint16_t torqueRaw = 0x0800u,
+                                      std::uint32_t frameId = 0x000u)
 {
     CanTransport::Frame frame {};
-    frame.id = 0x000u;
+    frame.id = frameId;
     frame.isExtended = false;
     frame.isRemoteRequest = false;
     frame.dlc = 8;
@@ -192,7 +194,7 @@ protected:
     {
     }
 
-    void configureVelocityMode(MotorID motorId)
+    void configureVelocityMode(MotorID motorId, std::uint32_t ackFrameId = 0x000u)
     {
         const auto nodeId = can_driver::toProtocolNodeId(motorId);
         auto future = std::async(std::launch::async, [&]() {
@@ -202,7 +204,7 @@ protected:
         ASSERT_TRUE(transport_->waitForSentFrameCount(1, std::chrono::milliseconds(200)));
         const auto frames = transport_->snapshotSentFrames();
         ASSERT_EQ(frames.size(), 1u);
-        transport_->simulateReceive(makeRegisterAck(nodeId, 10u, 3u));
+        transport_->simulateReceive(makeRegisterAck(nodeId, 10u, 3u, ackFrameId));
         ASSERT_TRUE(future.get());
 
         transport_->clearSentFrames();
@@ -365,6 +367,41 @@ TEST_F(DamiaoCanTest, FeedbackFrameUpdatesSharedStateUsingLegacyBitPacking)
     EXPECT_TRUE(feedback.faultValid);
     EXPECT_FALSE(feedback.fault);
     EXPECT_GT(feedback.lastRxSteadyNs, 0);
+}
+
+TEST_F(DamiaoCanTest, SetModeWaitsForAckOnConfiguredMasterId)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    damiao_.setMotorMasterId(kMotorId, 0x101u);
+
+    auto future = std::async(std::launch::async, [&]() {
+        return damiao_.setMode(kMotorId, CanProtocol::MotorMode::Velocity);
+    });
+
+    ASSERT_TRUE(transport_->waitForSentFrameCount(1, std::chrono::milliseconds(200)));
+    transport_->simulateReceive(makeRegisterAck(0x01u, 10u, 3u, 0x000u));
+    EXPECT_EQ(future.wait_for(std::chrono::milliseconds(20)), std::future_status::timeout);
+
+    transport_->simulateReceive(makeRegisterAck(0x01u, 10u, 3u, 0x101u));
+    EXPECT_TRUE(future.get());
+}
+
+TEST_F(DamiaoCanTest, FeedbackFrameUsesConfiguredMasterId)
+{
+    constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    damiao_.setMotorMasterId(kMotorId, 0x101u);
+    configureVelocityMode(kMotorId, 0x101u);
+
+    transport_->simulateReceive(
+        makeFeedbackFrame(0x01u, 0x01u, 0x8000u, 0x0800u, 0x0800u, 0x000u));
+    EXPECT_EQ(damiao_.getPosition(kMotorId), 0);
+    EXPECT_EQ(damiao_.getVelocity(kMotorId), 0);
+
+    transport_->simulateReceive(
+        makeFeedbackFrame(0x01u, 0x01u, 0x8000u, 0x0800u, 0x0800u, 0x101u));
+    EXPECT_TRUE(damiao_.isEnabled(kMotorId));
+    EXPECT_EQ(damiao_.getPosition(kMotorId), 2);
+    EXPECT_EQ(damiao_.getVelocity(kMotorId), 110);
 }
 
 TEST_F(DamiaoCanTest, KeepaliveRefreshReusesLastVelocityCommand)

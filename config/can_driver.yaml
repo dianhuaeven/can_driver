@@ -151,6 +151,7 @@ can_driver_node:
 
     - name: left_front_wheel_joint
       motor_id: 0x01
+      master_id: 0x000  # 可选：填写电机当前反馈使用的 Master ID；默认 0x000
       protocol: DM
       can_device: can1
       control_mode: velocity
@@ -158,6 +159,7 @@ can_driver_node:
 
     - name: right_front_wheel_joint
       motor_id: 0x02
+      master_id: 0x000  # 驱动只按此 ID 接收反馈，不会改写电机寄存器
       protocol: DM
       can_device: can1
       control_mode: velocity

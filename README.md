@@ -7,6 +7,8 @@ Supported protocols:
 - `PP` (Eyou)
 - `DM` (Damiao tracked motor backend, velocity-only in the first stage)
 
+DM joints support an optional YAML field `master_id` for matching the motor's current feedback CAN StdID. The driver reads this value but does not rewrite the motor register.
+
 Supported control modes:
 - `position` - Position control (PP mode)
 - `velocity` - Velocity control (PV mode)
