@@ -41,6 +41,7 @@ MODE_MAP = {"position": 0.0, "velocity": 1.0, "csp": 2.0}
 MODE_NAMES = {0: "未知", 1: "位置", 2: "速度", 3: "CSP", 5: "CSP"}
 
 NS = "/can_driver_node"
+DM_DEFAULT_SI_SCALE = 1e-4
 
 
 def normalize_scale(value, default=1.0):
@@ -55,6 +56,13 @@ def normalize_scale(value, default=1.0):
     if scale >= 2.0:
         return 2.0 * math.pi / scale
     return scale
+
+
+def default_scale_for_protocol(protocol: str) -> float:
+    """镜像 JointConfigParser 的协议默认 scale，避免 UI 与驱动显示口径不一致。"""
+    if str(protocol).strip().upper() == "DM":
+        return DM_DEFAULT_SI_SCALE
+    return 1.0
 
 
 class MotorPanel:
@@ -336,15 +344,21 @@ class RealtimeMotorUI:
         joints = node_cfg.get("joints", [])
         out = []
         for j in joints:
+            protocol = str(j.get("protocol", ""))
+            default_scale = default_scale_for_protocol(protocol)
             out.append(
                 {
                     "name": str(j.get("name", "")),
                     "motor_id": int(j.get("motor_id", 0)),
-                    "protocol": str(j.get("protocol", "")),
+                    "protocol": protocol,
                     "can_device": str(j.get("can_device", "can0")),
                     "control_mode": str(j.get("control_mode", "position")),
-                    "position_scale": normalize_scale(j.get("position_scale", 1.0)),
-                    "velocity_scale": normalize_scale(j.get("velocity_scale", 1.0)),
+                    "position_scale": normalize_scale(
+                        j.get("position_scale", default_scale), default_scale
+                    ),
+                    "velocity_scale": normalize_scale(
+                        j.get("velocity_scale", default_scale), default_scale
+                    ),
                 }
             )
         return [j for j in out if j["name"]]
