@@ -50,6 +50,7 @@ public:
     void initializeMotorRefresh(const std::vector<MotorID> &motorIds) override;
     void setRefreshRateHz(double hz);
     std::chrono::milliseconds refreshSleepInterval() const;
+    void setMotorMasterId(MotorID motorId, std::uint32_t masterId);
 
     using RefreshQuery = can_driver::DmRefreshQuery;
     bool issueRefreshQuery(MotorID motorId, RefreshQuery query);
@@ -108,6 +109,7 @@ private:
                   CanTxDispatcher::Category category,
                   const char *source) const;
     bool isManagedMotorId(std::uint8_t motorId) const;
+    std::uint32_t masterIdForMotor(std::uint8_t motorId) const;
     void registerManagedMotorId(MotorID motorId);
     MotorID resolveSystemMotorId(std::uint8_t motorId) const;
     can_driver::SharedDriverState::AxisKey makeAxisKey(std::uint8_t motorId) const;
@@ -135,6 +137,7 @@ private:
     std::size_t receiveHandlerId_{0};
     std::vector<std::uint8_t> refreshMotorIds_;
     std::unordered_set<std::uint8_t> managedMotorIds_;
+    std::unordered_map<std::uint8_t, std::uint32_t> masterIdsByNodeId_;
     std::unordered_map<std::uint8_t, MotorID> systemMotorIdsByNodeId_;
     mutable std::mutex refreshMutex_;
     std::atomic<double> refreshRateHz_{0.0};

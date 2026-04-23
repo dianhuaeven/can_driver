@@ -1,0 +1,12 @@
+<launch>
+  <arg name="config_file" default="$(find can_driver)/config/can_driver_tracks_only.yaml"/>
+  <arg name="controllers_file" default="$(find can_driver)/config/ros_controllers_tracks_only.yaml"/>
+  <arg name="start_controllers" default="joint_state_controller wheel_controller"/>
+
+  <include file="$(find can_driver)/launch/can_driver.launch">
+    <arg name="use_controllers" value="true"/>
+    <arg name="config_file" value="$(arg config_file)"/>
+    <arg name="controllers_file" value="$(arg controllers_file)"/>
+    <arg name="start_controllers" value="$(arg start_controllers)"/>
+  </include>
+</launch>

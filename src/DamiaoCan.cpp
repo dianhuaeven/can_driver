@@ -330,6 +330,14 @@ std::chrono::milliseconds DamiaoCan::refreshSleepInterval() const
     return computeRefreshSleep(std::max<std::size_t>(1, motorCount));
 }
 
+void DamiaoCan::setMotorMasterId(MotorID motorId, std::uint32_t masterId)
+{
+    const auto nodeId = toProtocolNodeId(motorId);
+    std::lock_guard<std::mutex> lock(refreshMutex_);
+    masterIdsByNodeId_[nodeId] = masterId;
+    systemMotorIdsByNodeId_[nodeId] = motorId;
+}
+
 bool DamiaoCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 {
     if (query != RefreshQuery::Keepalive || shuttingDown_.load(std::memory_order_acquire)) {
@@ -356,12 +364,11 @@ bool DamiaoCan::issueRefreshQuery(MotorID motorId, RefreshQuery query)
 
 void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
 {
-    if (frame.id != kDamiaoMasterId) {
-        return;
-    }
-
     if (frame.dlc >= 8 && frame.data[1] == 0 && frame.data[2] == kDamiaoWriteRegisterCommand) {
         const auto motorId = static_cast<std::uint8_t>(frame.data[0]);
+        if (frame.id != masterIdForMotor(motorId)) {
+            return;
+        }
         const auto registerId = frame.data[3];
         const auto value = readUInt32LE(frame, 4);
         bool matchedPendingAck = false;
@@ -378,6 +385,7 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
             pendingRegisterAckCv_.notify_all();
             return;
         }
+        return;
     }
 
     if (frame.dlc < 8) {
@@ -386,6 +394,9 @@ void DamiaoCan::handleResponse(const CanTransport::Frame &frame)
 
     const auto feedbackState = static_cast<std::uint8_t>((frame.data[0] >> 4) & 0x0Fu);
     const auto motorId = static_cast<std::uint8_t>(frame.data[0] & 0x0Fu);
+    if (frame.id != masterIdForMotor(motorId)) {
+        return;
+    }
     if (!isManagedMotorId(motorId)) {
         return;
     }
@@ -619,6 +630,13 @@ bool DamiaoCan::isManagedMotorId(std::uint8_t motorId) const
 {
     std::lock_guard<std::mutex> lock(refreshMutex_);
     return managedMotorIds_.find(motorId) != managedMotorIds_.end();
+}
+
+std::uint32_t DamiaoCan::masterIdForMotor(std::uint8_t motorId) const
+{
+    std::lock_guard<std::mutex> lock(refreshMutex_);
+    const auto it = masterIdsByNodeId_.find(motorId);
+    return (it == masterIdsByNodeId_.end()) ? kDamiaoMasterId : it->second;
 }
 
 void DamiaoCan::registerManagedMotorId(MotorID motorId)

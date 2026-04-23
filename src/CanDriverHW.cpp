@@ -349,6 +349,12 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                     can_driver::axisControlModeFromString(jc.controlMode);
                 const bool needsPositionFeedback =
                     can_driver::controlModeUsesPositionSemantics(axisMode);
+                // TODO(rera): Replace this DM-specific startup escape hatch with a
+                // protocol-driven StartupFeedbackPolicy if more backends require
+                // deferred feedback before enable.
+                const bool canDeferStartupFeedback =
+                    jc.protocol == CanType::DM &&
+                    can_driver::controlModeUsesVelocitySemantics(axisMode);
                 can_driver::SharedDriverState::AxisFeedbackState feedback;
                 const auto axisKey =
                     can_driver::MakeAxisKey(jc.canDevice, jc.protocol, jc.motorId);
@@ -363,6 +369,9 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                             feedback.faultValid || feedback.currentValid ||
                             feedback.positionValid));
                 if (!hasFreshFeedback || !hasRequiredStartupState) {
+                    if (canDeferStartupFeedback) {
+                        continue;
+                    }
                     allValid = false;
                     missingJoints.push_back(
                         jc.name + (needsPositionFeedback ? "(position)" : "(velocity/state)"));
@@ -619,6 +628,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.controlMode = p.controlMode;
         jc.motorId = p.motorId;
         jc.protocol = p.protocol;
+        jc.dmMasterId = p.dmMasterId;
         jc.positionScale = p.positionScale;
         jc.velocityScale = p.velocityScale;
         jc.directionSign = p.directionSign;
@@ -1365,6 +1375,19 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
     const bool ok = deviceManager_->initDevice(device, motors, loopback);
     if (!ok) {
         return false;
+    }
+
+    const auto dmBaseProto = deviceManager_->getProtocol(device, CanType::DM);
+    const auto dmProto = std::dynamic_pointer_cast<DamiaoCan>(dmBaseProto);
+    for (const auto &jc : joints_) {
+        if (jc.canDevice != device || jc.protocol != CanType::DM) {
+            continue;
+        }
+        if (!dmProto) {
+            ROS_ERROR("[CanDriverHW] DM protocol cast failed on '%s'.", jc.canDevice.c_str());
+            return false;
+        }
+        dmProto->setMotorMasterId(jc.motorId, jc.dmMasterId);
     }
 
     for (const auto &jc : joints_) {

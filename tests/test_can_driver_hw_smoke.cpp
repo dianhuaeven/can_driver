@@ -949,6 +949,29 @@ TEST_F(CanDriverHWSmokeTest, DamiaoVelocityInitAcceptsStartupFeedbackWithoutPosi
     EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 0);
 }
 
+TEST_F(CanDriverHWSmokeTest, DamiaoVelocityInitAllowsMissingStartupFeedbackBeforeEnable)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->setSeedFeedbackOnInit(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_dm_velocity_no_startup_feedback"));
+
+    pnh.setParam("joints", makeSingleDamiaoVelocityJoint());
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("startup_position_sync_timeout_sec", 0.05);
+    pnh.setParam("startup_probe_query_hz", 2.0);
+    pnh.setParam("motor_query_hz", 20.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    EXPECT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Armed);
+    EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 0);
+}
+
 TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();

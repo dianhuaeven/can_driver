@@ -7,6 +7,7 @@
 #include <joint_limits_interface/joint_limits.h>
 #include <ros/time.h>
 
+#include <cstdint>
 #include <cstddef>
 #include <string>
 #include <vector>
@@ -33,6 +34,7 @@ struct CanDriverJointConfig {
     CanType protocol{CanType::MT};
     std::string canDevice;
     std::string controlMode;
+    std::uint32_t dmMasterId{0};
 
     double positionScale{1.0};
     double velocityScale{1.0};
