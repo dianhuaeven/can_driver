@@ -134,6 +134,24 @@ float decodeFloatLE(const CanTransport::Frame &frame)
     return value;
 }
 
+std::uint32_t encodeFloatBits(float value)
+{
+    std::uint32_t bits = 0;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+std::uint32_t decodeUInt32LE(const CanTransport::Frame &frame, std::size_t index)
+{
+    if (index + 3 >= frame.dlc) {
+        return 0;
+    }
+    return static_cast<std::uint32_t>(frame.data[index]) |
+           (static_cast<std::uint32_t>(frame.data[index + 1]) << 8) |
+           (static_cast<std::uint32_t>(frame.data[index + 2]) << 16) |
+           (static_cast<std::uint32_t>(frame.data[index + 3]) << 24);
+}
+
 CanTransport::Frame makeRegisterAck(std::uint8_t motorId,
                                     std::uint8_t registerId,
                                     std::uint32_t value)
@@ -199,14 +217,43 @@ protected:
             return damiao_.setMode(motorId, CanProtocol::MotorMode::Velocity);
         });
 
-        ASSERT_TRUE(transport_->waitForSentFrameCount(1, std::chrono::milliseconds(200)));
-        const auto frames = transport_->snapshotSentFrames();
-        ASSERT_EQ(frames.size(), 1u);
-        transport_->simulateReceive(makeRegisterAck(nodeId, 10u, 3u));
+        ackVelocityModeAndFeedbackRanges(nodeId);
         ASSERT_TRUE(future.get());
 
         transport_->clearSentFrames();
         txDispatcher_->clearRequests();
+    }
+
+    void ackVelocityModeAndFeedbackRanges(std::uint8_t nodeId)
+    {
+        ASSERT_TRUE(transport_->waitForSentFrameCount(1, std::chrono::milliseconds(500)));
+        auto frames = transport_->snapshotSentFrames();
+        ASSERT_EQ(frames.size(), 1u);
+        EXPECT_EQ(frames[0].id, 0x7FFu);
+        EXPECT_EQ(frames[0].data[0], nodeId);
+        EXPECT_EQ(frames[0].data[3], 10u);
+        transport_->simulateReceive(makeRegisterAck(nodeId, 10u, 3u));
+
+        ASSERT_TRUE(transport_->waitForSentFrameCount(2, std::chrono::milliseconds(500)));
+        frames = transport_->snapshotSentFrames();
+        ASSERT_EQ(frames.size(), 2u);
+        EXPECT_EQ(frames[1].data[0], nodeId);
+        EXPECT_EQ(frames[1].data[3], 21u);
+        transport_->simulateReceive(makeRegisterAck(nodeId, 21u, encodeFloatBits(12.5f)));
+
+        ASSERT_TRUE(transport_->waitForSentFrameCount(3, std::chrono::milliseconds(500)));
+        frames = transport_->snapshotSentFrames();
+        ASSERT_EQ(frames.size(), 3u);
+        EXPECT_EQ(frames[2].data[0], nodeId);
+        EXPECT_EQ(frames[2].data[3], 22u);
+        transport_->simulateReceive(makeRegisterAck(nodeId, 22u, encodeFloatBits(45.0f)));
+
+        ASSERT_TRUE(transport_->waitForSentFrameCount(4, std::chrono::milliseconds(500)));
+        frames = transport_->snapshotSentFrames();
+        ASSERT_EQ(frames.size(), 4u);
+        EXPECT_EQ(frames[3].data[0], nodeId);
+        EXPECT_EQ(frames[3].data[3], 23u);
+        transport_->simulateReceive(makeRegisterAck(nodeId, 23u, encodeFloatBits(18.0f)));
     }
 
     const can_driver::SharedDriverState::AxisKey axisKey(MotorID motorId) const
@@ -225,31 +272,49 @@ protected:
 TEST_F(DamiaoCanTest, SetModeWritesLegacyVelocityRegisterFrame)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
+    constexpr std::uint8_t kNodeId = 0x01u;
 
     auto future = std::async(std::launch::async, [&]() {
         return damiao_.setMode(kMotorId, CanProtocol::MotorMode::Velocity);
     });
 
-    ASSERT_TRUE(transport_->waitForSentFrameCount(1, std::chrono::milliseconds(200)));
-    const auto frames = transport_->snapshotSentFrames();
-    ASSERT_EQ(frames.size(), 1u);
-
-    const auto &frame = frames[0];
-    EXPECT_EQ(frame.id, 0x7FFu);
-    EXPECT_FALSE(frame.isExtended);
-    EXPECT_FALSE(frame.isRemoteRequest);
-    EXPECT_EQ(frame.dlc, 8u);
-    EXPECT_EQ(frame.data[0], 0x01u);
-    EXPECT_EQ(frame.data[1], 0x00u);
-    EXPECT_EQ(frame.data[2], 0x55u);
-    EXPECT_EQ(frame.data[3], 10u);
-    EXPECT_EQ(frame.data[4], 0x03u);
-    EXPECT_EQ(frame.data[5], 0x00u);
-    EXPECT_EQ(frame.data[6], 0x00u);
-    EXPECT_EQ(frame.data[7], 0x00u);
-
-    transport_->simulateReceive(makeRegisterAck(0x01u, 10u, 3u));
+    ackVelocityModeAndFeedbackRanges(kNodeId);
     EXPECT_TRUE(future.get());
+
+    const auto frames = transport_->snapshotSentFrames();
+    ASSERT_EQ(frames.size(), 4u);
+
+    const auto &modeFrame = frames[0];
+    EXPECT_EQ(modeFrame.id, 0x7FFu);
+    EXPECT_FALSE(modeFrame.isExtended);
+    EXPECT_FALSE(modeFrame.isRemoteRequest);
+    EXPECT_EQ(modeFrame.dlc, 8u);
+    EXPECT_EQ(modeFrame.data[0], kNodeId);
+    EXPECT_EQ(modeFrame.data[1], 0x00u);
+    EXPECT_EQ(modeFrame.data[2], 0x55u);
+    EXPECT_EQ(modeFrame.data[3], 10u);
+    EXPECT_EQ(modeFrame.data[4], 0x03u);
+    EXPECT_EQ(modeFrame.data[5], 0x00u);
+    EXPECT_EQ(modeFrame.data[6], 0x00u);
+    EXPECT_EQ(modeFrame.data[7], 0x00u);
+
+    const auto &pMaxFrame = frames[1];
+    EXPECT_EQ(pMaxFrame.id, 0x7FFu);
+    EXPECT_EQ(pMaxFrame.data[0], kNodeId);
+    EXPECT_EQ(pMaxFrame.data[3], 21u);
+    EXPECT_EQ(decodeUInt32LE(pMaxFrame, 4), encodeFloatBits(12.5f));
+
+    const auto &vMaxFrame = frames[2];
+    EXPECT_EQ(vMaxFrame.id, 0x7FFu);
+    EXPECT_EQ(vMaxFrame.data[0], kNodeId);
+    EXPECT_EQ(vMaxFrame.data[3], 22u);
+    EXPECT_EQ(decodeUInt32LE(vMaxFrame, 4), encodeFloatBits(45.0f));
+
+    const auto &tMaxFrame = frames[3];
+    EXPECT_EQ(tMaxFrame.id, 0x7FFu);
+    EXPECT_EQ(tMaxFrame.data[0], kNodeId);
+    EXPECT_EQ(tMaxFrame.data[3], 23u);
+    EXPECT_EQ(decodeUInt32LE(tMaxFrame, 4), encodeFloatBits(18.0f));
 
     can_driver::SharedDriverState::AxisCommandState command;
     ASSERT_TRUE(sharedState_->getAxisCommand(axisKey(kMotorId), &command));

@@ -562,6 +562,13 @@ bool DamiaoCan::ensureVelocityModeConfigured(std::uint8_t motorId)
     }
     std::this_thread::sleep_for(kDamiaoConfigStepDelay);
 
+    // 当前反馈解码固定按默认 P/V/T 量程解释。
+    // 先把电机端反馈量程配置到同一组值，避免不同电机保存的旧量程导致
+    // “同样目标、反馈幅值却不一致”的错解现象。
+    if (!ensureFeedbackMappingConfigured(motorId)) {
+        return false;
+    }
+
     {
         std::lock_guard<std::mutex> lock(stateMutex_);
         auto &state = motorStates_[motorId];
