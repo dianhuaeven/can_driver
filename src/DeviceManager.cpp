@@ -964,6 +964,20 @@ void DeviceManager::setPpCspDefaultVelocityRaw(int32_t velocityRaw)
     }
 }
 
+bool DeviceManager::configureDmMotorMasterId(const std::string &device,
+                                             MotorID motorId,
+                                             std::uint32_t masterId)
+{
+    std::shared_lock<std::shared_mutex> lock(mutex_);
+    const auto it = damiaoProtocols_.find(device);
+    if (it == damiaoProtocols_.end() || !it->second) {
+        return false;
+    }
+
+    it->second->setMotorMasterId(motorId, masterId);
+    return true;
+}
+
 void DeviceManager::shutdownAll()
 {
     std::unique_lock<std::shared_mutex> lock(mutex_);

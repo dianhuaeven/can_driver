@@ -180,6 +180,10 @@ public:
     void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void setPpPositionDefaultVelocityRaw(int32_t) override {}
     void setPpCspDefaultVelocityRaw(int32_t) override {}
+    bool configureDmMotorMasterId(const std::string &, MotorID, std::uint32_t) override
+    {
+        return true;
+    }
     void shutdownDevice(const std::string &device) override
     {
         ++shutdownDeviceCalls_;

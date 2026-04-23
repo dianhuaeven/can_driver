@@ -152,6 +152,12 @@ OperationalCoordinator::Result CanDriverRuntime::prepareLifecycleDeviceForStandb
         return prepareResult;
     }
 
+    if (lifecycleHooks_.apply_device_protocol_config &&
+        !lifecycleHooks_.apply_device_protocol_config(device)) {
+        restoreSteadyRefresh();
+        return rollbackPreparedDevice(
+            {false, "Failed to apply device protocol config on " + device});
+    }
     if (lifecycleHooks_.apply_persisted_pp_zero_offsets &&
         !lifecycleHooks_.apply_persisted_pp_zero_offsets(device)) {
         restoreSteadyRefresh();

@@ -59,6 +59,10 @@ public:
     void setPpPositionDefaultVelocityRaw(int32_t velocityRaw) override;
     /// 设置 PP CSP 模式命令默认预配置速度（0x09，协议原始单位）。
     void setPpCspDefaultVelocityRaw(int32_t velocityRaw) override;
+    /// 为指定 DM 电机配置反馈使用的 master_id。
+    bool configureDmMotorMasterId(const std::string &device,
+                                  MotorID motorId,
+                                  std::uint32_t masterId) override;
     /// 停止并释放单个设备资源，不影响其他 device。
     void shutdownDevice(const std::string &device) override;
     /// 停止并释放所有设备资源。

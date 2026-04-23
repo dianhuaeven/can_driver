@@ -201,6 +201,7 @@ private:
     void loadJointLimits(const ros::NodeHandle &pnh);
     bool syncStartupPositionAndCommands(const std::string &deviceFilter = std::string());
     bool applyPersistedPpZeroOffsets(const std::string &deviceFilter = std::string());
+    bool applyDeviceProtocolConfig(const std::string &deviceFilter = std::string());
     bool applyInitialModes(const std::string &deviceFilter = std::string());
     bool applyPerAxisPpDefaultVelocities(const std::string &deviceFilter = std::string());
     void configureCommandGate();

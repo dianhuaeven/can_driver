@@ -6,6 +6,7 @@
 #include "can_driver/MotorID.h"
 
 #include <memory>
+#include <cstdint>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -33,6 +34,9 @@ public:
     virtual void setPpDefaultPositionVelocityRaw(int32_t velocityRaw) = 0;
     virtual void setPpPositionDefaultVelocityRaw(int32_t velocityRaw) = 0;
     virtual void setPpCspDefaultVelocityRaw(int32_t velocityRaw) = 0;
+    virtual bool configureDmMotorMasterId(const std::string &device,
+                                          MotorID motorId,
+                                          std::uint32_t masterId) = 0;
     virtual void shutdownDevice(const std::string &device) = 0;
     virtual void shutdownAll() = 0;
 

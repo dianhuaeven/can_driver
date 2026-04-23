@@ -778,6 +778,9 @@ void CanDriverHW::configureLifecycleCoordinator()
             deviceManager_->setDeviceRefreshRateHz(device, refreshRateHz);
         },
         [this](const std::string &device) {
+            return applyDeviceProtocolConfig(device);
+        },
+        [this](const std::string &device) {
             return applyPersistedPpZeroOffsets(device);
         },
         [this](const std::string &device) {
@@ -790,6 +793,23 @@ void CanDriverHW::configureLifecycleCoordinator()
             return applyInitialModes(device);
         },
     });
+}
+
+bool CanDriverHW::applyDeviceProtocolConfig(const std::string &deviceFilter)
+{
+    for (const auto &jc : joints_) {
+        if (jc.canDevice != deviceFilter || jc.protocol != CanType::DM) {
+            continue;
+        }
+        if (!deviceManager_->configureDmMotorMasterId(jc.canDevice, jc.motorId, jc.dmMasterId)) {
+            ROS_ERROR("[CanDriverHW] Failed to apply DM master_id=0x%03X for joint '%s' on '%s'.",
+                      static_cast<unsigned>(jc.dmMasterId),
+                      jc.name.c_str(),
+                      jc.canDevice.c_str());
+            return false;
+        }
+    }
+    return true;
 }
 
 void CanDriverHW::configureCommandGate()
@@ -1377,17 +1397,8 @@ bool CanDriverHW::initDevice(const std::string &device, bool loopback)
         return false;
     }
 
-    const auto dmBaseProto = deviceManager_->getProtocol(device, CanType::DM);
-    const auto dmProto = std::dynamic_pointer_cast<DamiaoCan>(dmBaseProto);
-    for (const auto &jc : joints_) {
-        if (jc.canDevice != device || jc.protocol != CanType::DM) {
-            continue;
-        }
-        if (!dmProto) {
-            ROS_ERROR("[CanDriverHW] DM protocol cast failed on '%s'.", jc.canDevice.c_str());
-            return false;
-        }
-        dmProto->setMotorMasterId(jc.motorId, jc.dmMasterId);
+    if (!applyDeviceProtocolConfig(device)) {
+        return false;
     }
 
     for (const auto &jc : joints_) {

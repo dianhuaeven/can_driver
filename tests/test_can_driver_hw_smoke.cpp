@@ -27,6 +27,7 @@
 #include <set>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -523,6 +524,14 @@ public:
     void setPpDefaultPositionVelocityRaw(int32_t) override {}
     void setPpPositionDefaultVelocityRaw(int32_t) override {}
     void setPpCspDefaultVelocityRaw(int32_t) override {}
+    bool configureDmMotorMasterId(const std::string &device,
+                                  MotorID motorId,
+                                  std::uint32_t masterId) override
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        dmMasterIdCalls_.emplace_back(device, motorId, masterId);
+        return true;
+    }
     void shutdownDevice(const std::string &device) override
     {
         std::lock_guard<std::mutex> lock(lifecycleMutex_);
@@ -674,6 +683,12 @@ public:
         return deviceRefreshRateHzCalls_;
     }
 
+    std::vector<std::tuple<std::string, MotorID, std::uint32_t>> dmMasterIdCalls() const
+    {
+        std::lock_guard<std::mutex> lock(lifecycleMutex_);
+        return dmMasterIdCalls_;
+    }
+
 private:
     std::shared_ptr<FakeProtocol> protocol_;
     std::shared_ptr<std::mutex> mutex_;
@@ -692,6 +707,7 @@ private:
     bool velocityOnlyFeedbackOnInit_{false};
     std::vector<double> refreshRateHzCalls_;
     std::vector<std::pair<std::string, double>> deviceRefreshRateHzCalls_;
+    std::vector<std::tuple<std::string, MotorID, std::uint32_t>> dmMasterIdCalls_;
     std::set<std::string> ensuredDevices_;
     std::set<std::pair<std::string, CanType>> ensuredProtocols_;
     std::set<std::string> initializedDevices_;
@@ -743,7 +759,8 @@ protected:
         return joints;
     }
 
-    static XmlRpc::XmlRpcValue makeSingleDamiaoVelocityJoint(double directionSign = 1.0)
+    static XmlRpc::XmlRpcValue makeSingleDamiaoVelocityJoint(double directionSign = 1.0,
+                                                             int masterId = 0)
     {
         XmlRpc::XmlRpcValue joints;
         joints.setSize(1);
@@ -753,6 +770,9 @@ protected:
         joints[0]["can_device"] = "fake0";
         joints[0]["control_mode"] = "velocity";
         joints[0]["direction_sign"] = directionSign;
+        if (masterId >= 0) {
+            joints[0]["master_id"] = masterId;
+        }
         return joints;
     }
 
@@ -970,6 +990,33 @@ TEST_F(CanDriverHWSmokeTest, DamiaoVelocityInitAllowsMissingStartupFeedbackBefor
     EXPECT_TRUE(initResult.ok) << initResult.message;
     EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Armed);
     EXPECT_EQ(fakeDm->shutdownDeviceCalls(), 0);
+}
+
+TEST_F(CanDriverHWSmokeTest, DamiaoVelocityInitAppliesConfiguredMasterIdDuringPrepare)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->setSeedFeedbackOnInit(false);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_dm_master_id_prepare"));
+
+    pnh.setParam("joints", makeSingleDamiaoVelocityJoint(1.0, 0x101));
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("startup_position_sync_timeout_sec", 0.05);
+    pnh.setParam("startup_probe_query_hz", 2.0);
+    pnh.setParam("motor_query_hz", 20.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    const auto dmMasterIdCalls = fakeDm->dmMasterIdCalls();
+    ASSERT_EQ(dmMasterIdCalls.size(), 1u);
+    EXPECT_EQ(std::get<0>(dmMasterIdCalls[0]), "fake0");
+    EXPECT_EQ(static_cast<unsigned>(std::get<1>(dmMasterIdCalls[0])), 0x01u);
+    EXPECT_EQ(std::get<2>(dmMasterIdCalls[0]), 0x101u);
 }
 
 TEST_F(CanDriverHWSmokeTest, InitFailsFastWhenStartupFeedbackNeverArrives)
