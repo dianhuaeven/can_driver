@@ -72,8 +72,8 @@ class MotorPanel:
         self.name = joint_cfg["name"]
         self.motor_id = joint_cfg["motor_id"]
         self.default_mode = joint_cfg["control_mode"]
-        self.position_scale = joint_cfg["position_scale"]
-        self.velocity_scale = joint_cfg["velocity_scale"]
+        self.position_scale = joint_cfg["position_scale"] * joint_cfg["direction_sign"]
+        self.velocity_scale = joint_cfg["velocity_scale"] * joint_cfg["direction_sign"]
         self.motor_cmd = motor_cmd_proxy
 
         self.position = tk.StringVar(value="0.0000")
@@ -353,6 +353,7 @@ class RealtimeMotorUI:
                     "protocol": protocol,
                     "can_device": str(j.get("can_device", "can0")),
                     "control_mode": str(j.get("control_mode", "position")),
+                    "direction_sign": float(j.get("direction_sign", 1.0)),
                     "position_scale": normalize_scale(
                         j.get("position_scale", default_scale), default_scale
                     ),
