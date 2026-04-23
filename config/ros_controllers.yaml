@@ -47,10 +47,10 @@ arm_controller:
   # 受控关节列表，名称须与 can_driver.yaml 中的 name 字段及 URDF 完全一致。
   joints:
     - elbow_pitch_joint        # 小臂俯仰（第 3 轴）
-    # - wrist_pitch_joint        # 腕部俯仰（第 4 轴）
-    # - wrist_roll_joint         # 腕部滚转（第 5 轴）
-    # - wrist_yaw_joint          # 腕部偏航（第 6 轴）
-    # - left_gripper_finger_joint  # 左夹爪（第 7 轴）
+    - wrist_pitch_joint        # 腕部俯仰（第 4 轴）
+    - wrist_roll_joint         # 腕部滚转（第 5 轴）
+    - wrist_yaw_joint          # 腕部偏航（第 6 轴）
+    - left_gripper_finger_joint  # 左夹爪（第 7 轴）
 
   # 轨迹执行约束（可选，未填则使用插件默认值）
   # constraints:
