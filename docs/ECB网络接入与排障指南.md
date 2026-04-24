@@ -220,6 +220,6 @@ bash scripts/test_ecb_motor_motion.sh 5 0.8 2.0 1.2 2.0 /can_driver_node
 
 - 生产环境优先 fixed IP + ID，避免每次启动扫描带来的不确定性。
 - 所有协议统一走 `config/can_driver.yaml` 和 `launch/can_driver.launch`；ECB 后端由 `protocol: ECB` 自动分流。
-- 仅接 ECB 时，建议把 `config/can_driver.yaml` 精简为当前机器真实接入的 ECB joints，避免被无关 `can0/can1` 配置连带启动失败。
+- 仅接 ECB 时，建议把 `config/can_driver.yaml` 精简为当前机器真实接入的 ECB joints，避免被无关 `canable0/canable1` 配置连带启动失败。
 - 首次联调建议先速度小幅正反，再做小角度位置闭环，再放大位移。
 - 保持单节点独占控制，避免多个节点同时写同一 joint 的 direct topic。

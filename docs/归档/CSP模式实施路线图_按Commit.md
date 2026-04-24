@@ -423,7 +423,7 @@ roslaunch can_driver can_driver.launch
 # 使用示波器或 CAN 分析仪测量
 
 # 3. 性能测试（总线占用率）
-candump can0 | wc -l
+candump canable0 | wc -l
 ```
 
 ### 预期结果

@@ -22,7 +22,7 @@ can_driver_node:
     - name: rotary_table
       motor_id: 0x16
       protocol: PP          # 协议类型：PP（EyouCan）或 MT，与 control_mode 独立
-      can_device: can0
+      can_device: canable0
       control_mode: csp     # 运动控制模式：position / velocity / csp
       position_scale: 9.587379924285257e-05
       velocity_scale: 9.587379924285257e-05
@@ -30,7 +30,7 @@ can_driver_node:
     - name: larger_arm
       motor_id: 0x05
       protocol: PP
-      can_device: can0
+      can_device: canable0
       control_mode: csp
 ```
 
@@ -95,14 +95,14 @@ can_driver_node:
     - name: joint1
       motor_id: 0x01
       protocol: PP
-      can_device: can0
+      can_device: canable0
       control_mode: csp
       position_scale: 9.587379924285257e-05
 
     - name: joint2
       motor_id: 0x02
       protocol: PP
-      can_device: can0
+      can_device: canable0
       control_mode: csp
       position_scale: 9.587379924285257e-05
 ```

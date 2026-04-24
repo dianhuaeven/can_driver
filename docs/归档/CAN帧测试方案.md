@@ -186,7 +186,7 @@ sudo ip link set up vcan0
 roslaunch can_driver can_driver.launch
 
 # 2. 在另一个终端监控 CAN 帧
-candump can0
+candump canable0
 
 # 3. 发送极小命令
 rostopic pub /can_driver/motor/joint1/cmd_position std_msgs/Float64 "data: 0.01"
@@ -203,7 +203,7 @@ rostopic pub /can_driver/motor/joint1/cmd_position std_msgs/Float64 "data: 0.01"
 
 ```bash
 # 1. 手动发送 CAN 帧（模拟电机反馈）
-cansend can0 241#0010000000000000  # 发送位置 = 0x1000
+cansend canable0 241#0010000000000000  # 发送位置 = 0x1000
 
 # 2. 查看 ROS topic
 rostopic echo /can_driver/motor_states
@@ -282,7 +282,7 @@ def decode_mt_position_frame(frame):
     return None
 
 def main():
-    bus = can.interface.Bus(channel='can0', bustype='socketcan')
+    bus = can.interface.Bus(channel='canable0', bustype='socketcan')
 
     print("Listening for CAN frames...")
     for msg in bus:
@@ -303,8 +303,8 @@ set -e
 echo "=== CAN Driver Hardware Test Suite ==="
 
 # 1. 检查 CAN 设备
-if ! ip link show can0 &>/dev/null; then
-    echo "ERROR: can0 not found"
+if ! ip link show canable0 &>/dev/null; then
+    echo "ERROR: canable0 not found"
     exit 1
 fi
 
@@ -323,7 +323,7 @@ rostopic pub -1 /can_driver/motor/joint1/cmd_position std_msgs/Float64 "data: 0.
 sleep 1
 
 # 5. 验证 CAN 帧（使用 candump）
-timeout 2 candump can0 | grep "241" || echo "No feedback received"
+timeout 2 candump canable0 | grep "241" || echo "No feedback received"
 
 # 6. 清理
 kill $DRIVER_PID

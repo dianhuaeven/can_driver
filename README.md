@@ -10,14 +10,18 @@ can_driver/
 |   |-- HomeMotor.action
 |   `-- MoveMotor.action
 |-- config/
+|   |-- can_driver_arm_only.yaml
 |   |-- can_driver.yaml
 |   |-- mt_control_profiles.yaml
-|   `-- ros_controllers.yaml
+|   |-- can_driver_tracks_only.yaml
+|   |-- ros_controllers.yaml
+|   `-- ros_controllers_tracks_only.yaml
 |-- docs/
 |   |-- README.md
 |   `-- 归档/
 |-- launch/
-|   `-- can_driver.launch
+|   |-- can_driver.launch
+|   `-- tracks_only.launch
 |-- msg/
 |   `-- MotorState.msg
 |-- scripts/
@@ -55,6 +59,12 @@ source devel/setup.bash
 
 ```bash
 roslaunch can_driver can_driver.launch
+```
+
+仅启动履带：
+
+```bash
+roslaunch can_driver tracks_only.launch
 ```
 
 如果要一并加载控制器：
@@ -145,11 +155,19 @@ rosservice call /can_driver_node/set_zero_limit "{motor_id: 1}"
 关键参数：
 
 - `config/can_driver.yaml`
-  - 总线设备、关节映射、协议类型、驱动频率、超时和限位策略
+  - 默认全量 can_driver 电机配置
+- `config/can_driver_tracks_only.yaml`
+  - 履带专用硬件配置
+- `config/can_driver_arm_only.yaml`
+  - 机械臂后半段专用硬件配置
 - `config/ros_controllers.yaml`
-  - `ros_control` 控制器定义
+  - 默认控制器定义
+- `config/ros_controllers_tracks_only.yaml`
+  - 履带专用控制器定义
 - `launch/can_driver.launch`
   - 是否加载控制器、启动哪些控制器
+- `launch/tracks_only.launch`
+  - 履带专用启动入口
 
 ## 使用边界
 
@@ -165,5 +183,5 @@ rosservice call /can_driver_node/set_zero_limit "{motor_id: 1}"
 - 推荐先读：
   - `docs/配置文件字段详解与从零配置指南.md`
   - `docs/使用指南.md`
-  - `docs/架构设计.md`
+  - `docs/电机配置变更指南.md`
   - `docs/达妙履带接入说明.md`
