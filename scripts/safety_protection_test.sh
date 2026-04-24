@@ -12,7 +12,7 @@ set -euo pipefail
 NS="${NS:-/can_driver_node}"
 MOTOR_ID="${MOTOR_ID:-22}"
 JOINT_NAME="${JOINT_NAME:-rotary_table}"
-CAN_DEV="${CAN_DEV:-can0}"
+CAN_DEV="${CAN_DEV:-canable0}"
 POS_EPS_RAW="${POS_EPS_RAW:-10}"
 SHORT_WAIT="${SHORT_WAIT:-0.4}"
 MOVE_WAIT="${MOVE_WAIT:-1.5}"

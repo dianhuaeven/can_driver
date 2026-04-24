@@ -29,7 +29,7 @@
 /**
  * @brief 管理 CAN 设备、传输层和协议实例的集中入口。
  *
- * 一个 device（如 can0/vcan0）只会持有一个传输层实例，
+ * 一个 device（如 canable0/vcan0）只会持有一个传输层实例，
  * 但可以按需同时挂载 MT/PP 两套协议对象。
  */
 class DeviceManager : public IDeviceManager {
@@ -125,7 +125,7 @@ private:
 
     // 读多写少：读取协议/transport 时使用 shared_lock，创建/销毁时 unique_lock。
     mutable std::shared_mutex mutex_;
-    // key = can device name（例如 can0/vcan0）。
+    // key = can device name（例如 canable0/vcan0）。
     std::map<std::string, std::shared_ptr<SocketCanController>> transports_;
     std::map<std::string, std::shared_ptr<UdpCanTransport>> udpTransports_;
     std::map<std::string, std::shared_ptr<CanTxDispatcher>> txDispatchers_;

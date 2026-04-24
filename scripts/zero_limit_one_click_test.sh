@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 
 # 一次性联调脚本：零点+限位功能验证
-# 默认按 docs/零点限位功能测试方案.md 覆盖核心场景（T1/T2/T3/T4/T5/T7）
+# 默认按 docs/归档/零点限位功能测试方案.md 覆盖核心场景（T1/T2/T3/T4/T5/T7）
 
 set -u
 
 NS="${NS:-/can_driver_node}"
 MOTOR_ID="${MOTOR_ID:-22}"
-CAN_DEV="${CAN_DEV:-can0}"
+CAN_DEV="${CAN_DEV:-canable0}"
 JOINT_NAME="${JOINT_NAME:-rotary_table}"
 MOTOR_CAN_HEX="$(printf "%03X" "$MOTOR_ID")"
 

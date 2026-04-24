@@ -84,7 +84,7 @@ protected:
         : transport(std::make_shared<MockTransport>())
         , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
         , sharedState(std::make_shared<can_driver::SharedDriverState>())
-        , mt(transport, txDispatcher, sharedState, "can0")
+        , mt(transport, txDispatcher, sharedState, "canable0")
     {
     }
 
@@ -210,7 +210,7 @@ TEST_F(MtCanTest, WritesRouteThroughUnifiedTxDispatcher)
 TEST_F(MtCanTest, CommandsPopulateSharedStateIntentAndTargets)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::MT, kMotorId);
 
     ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
     ASSERT_TRUE(mt.Enable(kMotorId));
@@ -228,7 +228,7 @@ TEST_F(MtCanTest, CommandsPopulateSharedStateIntentAndTargets)
 TEST_F(MtCanTest, SetModeUpdatesDesiredModeWithoutPretendingMotionCommandExists)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::MT, kMotorId);
 
     ASSERT_TRUE(mt.setVelocity(kMotorId, 4321));
     ASSERT_TRUE(mt.setMode(kMotorId, CanProtocol::MotorMode::Position));
@@ -290,7 +290,7 @@ TEST_F(MtCanTest, HandleResponseParsesStateFrame)
 TEST_F(MtCanTest, ResponsesUpdateSharedFeedbackFreshness)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x01);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::MT, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::MT, kMotorId);
 
     CanTransport::Frame frame {};
     frame.id = 0x241;
@@ -408,7 +408,7 @@ TEST_F(MtCanTest, IssueRefreshQueryBacksOffAfterRepeatedReadTimeouts)
 
     can_driver::SharedDriverState::AxisFeedbackState feedback;
     ASSERT_TRUE(
-        sharedState->getAxisFeedback(can_driver::MakeAxisKey("can0", CanType::MT, static_cast<MotorID>(0x01)),
+        sharedState->getAxisFeedback(can_driver::MakeAxisKey("canable0", CanType::MT, static_cast<MotorID>(0x01)),
                                      &feedback));
     EXPECT_EQ(feedback.consecutiveTimeoutCount, 1u);
     EXPECT_TRUE(feedback.degraded);

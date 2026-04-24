@@ -98,7 +98,7 @@ protected:
         : transport(std::make_shared<MockTransport>())
         , txDispatcher(std::make_shared<MockTxDispatcher>(transport))
         , sharedState(std::make_shared<can_driver::SharedDriverState>())
-        , eyou(transport, txDispatcher, sharedState, "can0")
+        , eyou(transport, txDispatcher, sharedState, "canable0")
     {
     }
 
@@ -325,7 +325,7 @@ TEST_F(EyouCanTest, WritesRouteThroughUnifiedTxDispatcher)
 TEST_F(EyouCanTest, CommandsPopulateSharedStateIntentAndTargets)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::PP, kMotorId);
 
     ASSERT_TRUE(eyou.setPosition(kMotorId, 1234));
     ASSERT_TRUE(eyou.Enable(kMotorId));
@@ -343,7 +343,7 @@ TEST_F(EyouCanTest, CommandsPopulateSharedStateIntentAndTargets)
 TEST_F(EyouCanTest, SetModeUpdatesDesiredModeWithoutPretendingMotionCommandExists)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::PP, kMotorId);
 
     ASSERT_TRUE(eyou.setPosition(kMotorId, 1234));
     ASSERT_TRUE(eyou.setMode(kMotorId, CanProtocol::MotorMode::CSP));
@@ -541,7 +541,7 @@ TEST_F(EyouCanTest, HandleReadResponseUpdatesPositionCache)
 TEST_F(EyouCanTest, ReadResponsesUpdateSharedFeedbackFreshness)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::PP, kMotorId);
 
     CanTransport::Frame frame {};
     frame.id = 0x0005;
@@ -569,7 +569,7 @@ TEST_F(EyouCanTest, ReadResponsesUpdateSharedFeedbackFreshness)
 TEST_F(EyouCanTest, ModeReadResponseDecodesCspAndUpdatesSharedFeedback)
 {
     constexpr MotorID kMotorId = static_cast<MotorID>(0x05);
-    const auto axisKey = can_driver::MakeAxisKey("can0", CanType::PP, kMotorId);
+    const auto axisKey = can_driver::MakeAxisKey("canable0", CanType::PP, kMotorId);
 
     CanTransport::Frame frame {};
     frame.id = 0x0005;

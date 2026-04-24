@@ -20,7 +20,7 @@ XmlRpc::XmlRpcValue makeJointBase(const std::string &name,
     joint["name"] = name;
     joint["motor_id"] = motorId;
     joint["protocol"] = protocol;
-    joint["can_device"] = std::string("can0");
+    joint["can_device"] = std::string("canable0");
     joint["control_mode"] = std::string("position");
     return joint;
 }
@@ -95,7 +95,7 @@ TEST(JointConfigParser, ParseRejectsMissingRequiredField)
     joint["name"] = std::string("j0");
     joint["motor_id"] = 1;
     joint["protocol"] = std::string("MT");
-    joint["can_device"] = std::string("can0");
+    joint["can_device"] = std::string("canable0");
     // missing control_mode
 
     auto list = makeJointList(joint);
@@ -282,7 +282,7 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     ASSERT_TRUE(parse(list, out, err));
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0].name, "joint_default_scale");
-    EXPECT_EQ(out[0].canDevice, "can0");
+    EXPECT_EQ(out[0].canDevice, "canable0");
     EXPECT_EQ(out[0].controlMode, "position");
     EXPECT_EQ(out[0].protocol, CanType::PP);
     EXPECT_EQ(static_cast<uint16_t>(out[0].motorId), 7u);

@@ -206,7 +206,7 @@ protected:
         : transport_(std::make_shared<MockTransport>())
         , txDispatcher_(std::make_shared<MockTxDispatcher>(transport_))
         , sharedState_(std::make_shared<can_driver::SharedDriverState>())
-        , damiao_(transport_, txDispatcher_, sharedState_, "can0")
+        , damiao_(transport_, txDispatcher_, sharedState_, "canable0")
     {
     }
 
@@ -258,7 +258,7 @@ protected:
 
     const can_driver::SharedDriverState::AxisKey axisKey(MotorID motorId) const
     {
-        return can_driver::MakeAxisKey("can0", CanType::DM, motorId);
+        return can_driver::MakeAxisKey("canable0", CanType::DM, motorId);
     }
 
     std::shared_ptr<MockTransport> transport_;

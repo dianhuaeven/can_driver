@@ -351,7 +351,7 @@ class RealtimeMotorUI:
                     "name": str(j.get("name", "")),
                     "motor_id": int(j.get("motor_id", 0)),
                     "protocol": protocol,
-                    "can_device": str(j.get("can_device", "can0")),
+                    "can_device": str(j.get("can_device", "canable0")),
                     "control_mode": str(j.get("control_mode", "position")),
                     "direction_sign": float(j.get("direction_sign", 1.0)),
                     "position_scale": normalize_scale(

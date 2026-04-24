@@ -39,7 +39,7 @@ public:
 
     /**
      * @brief Initialize the CAN interface.
-     * @param device SocketCAN device name (e.g. "can0").
+     * @param device SocketCAN device name (e.g. "canable0").
      * @param loopback Whether this socket should receive its own transmitted
      * frames. Kernel local loopback remains enabled so local sniffers such as
      * candump can still observe outgoing traffic.

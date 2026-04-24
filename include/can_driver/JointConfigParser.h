@@ -17,7 +17,7 @@ namespace joint_config_parser {
  */
 struct ParsedJointConfig {
     std::string name;        ///< 关节名称
-    std::string canDevice;   ///< 绑定的 CAN 设备名（如 can0）
+    std::string canDevice;   ///< 绑定的 CAN 设备名（如 canable0）
     std::string controlMode; ///< 控制模式字符串（position/velocity）
     MotorID motorId{MotorID::LeftWheel}; ///< 电机 ID
     CanType protocol{CanType::MT};       ///< 协议类型
