@@ -69,6 +69,7 @@ struct CanDriverJointConfig {
 
     bool stopIssuedOnFault{false};
     bool requireCommandAlignment{false};
+    bool startupPositionOutsideLimits{false};
 };
 
 struct CanDriverDeviceProtocolGroup {

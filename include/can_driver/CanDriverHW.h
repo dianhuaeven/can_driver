@@ -189,6 +189,7 @@ private:
     bool safetyRequireEnabledForMotion_{true};
     double maxPositionStepRad_{0.0};
     bool safetyHoldAfterDeviceRecover_{true};
+    bool allowStartupPositionOutsideLimitsForCalibration_{false};
 
     // -----------------------------------------------------------------------
     // 内部辅助
@@ -229,6 +230,7 @@ private:
                                              const char *operation,
                                              std::string *message) const;
     bool lifecycleHealthHealthy(std::string *detail) const;
+    bool startupLimitCalibrationReady(std::string *detail) const;
     std::string defaultLocalZeroOffsetFilePath() const;
     bool loadPersistedLocalZeroOffsets();
     bool savePersistedLocalZeroOffsets() const;

@@ -64,6 +64,15 @@ bool sharedFeedbackFresh(const can_driver::SharedDriverState::AxisFeedbackState 
     return (nowNs - feedback.lastRxSteadyNs) <= config.feedbackFreshnessTimeoutNs;
 }
 
+bool positionOutsideLimits(const can_driver::CanDriverJointConfig &joint)
+{
+    return joint.hasLimits &&
+           joint.limits.has_position_limits &&
+           std::isfinite(joint.pos) &&
+           (joint.pos < joint.limits.min_position ||
+            joint.pos > joint.limits.max_position);
+}
+
 } // namespace
 
 CanDriverHW::CanDriverHW()
@@ -217,6 +226,10 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
                  startupProbeQueryHz_);
         startupProbeQueryHz_ = 5.0;
     }
+    if (!pnh.getParam("allow_startup_position_outside_limits_for_calibration",
+                      allowStartupPositionOutsideLimitsForCalibration_)) {
+        allowStartupPositionOutsideLimitsForCalibration_ = false;
+    }
     if (!pnh.getParam("pp_fast_write_enabled", ppFastWriteEnabled_)) {
         ppFastWriteEnabled_ = false;
     }
@@ -291,6 +304,8 @@ bool CanDriverHW::loadRuntimeParams(const ros::NodeHandle &pnh)
              startupPositionSyncTimeoutSec_);
     ROS_INFO("[CanDriverHW] startup_probe_query_hz=%.3f Hz.",
              startupProbeQueryHz_);
+    ROS_INFO("[CanDriverHW] allow_startup_position_outside_limits_for_calibration=%s.",
+             allowStartupPositionOutsideLimitsForCalibration_ ? "true" : "false");
     ROS_INFO("[CanDriverHW] safety_stop_on_fault=%s, safety_require_enabled_for_motion=%s, max_position_step_rad=%.6f.",
              safetyStopOnFault_ ? "true" : "false",
              safetyRequireEnabledForMotion_ ? "true" : "false",
@@ -543,8 +558,17 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 // 上电后将位置命令对齐到当前反馈，避免控制循环首拍跳变。
                 // CSP 模式与 position 模式共用 posCmd，同样需要对齐。
                 jc.posCmd = jc.pos;
-                if (jc.hasLimits && jc.limits.has_position_limits) {
-                    if (jc.pos < jc.limits.min_position || jc.pos > jc.limits.max_position) {
+                jc.startupPositionOutsideLimits = false;
+                if (positionOutsideLimits(jc)) {
+                    if (allowStartupPositionOutsideLimitsForCalibration_) {
+                        jc.startupPositionOutsideLimits = true;
+                        ROS_WARN("[CanDriverHW] Joint '%s' startup position %.6f outside limits [%.6f, %.6f]; "
+                                 "calibration init is allowed, but release/run remains blocked until the joint is back inside limits.",
+                                 jc.name.c_str(),
+                                 jc.pos,
+                                 jc.limits.min_position,
+                                 jc.limits.max_position);
+                    } else {
                         startupOutOfRange = true;
                         ROS_ERROR("[CanDriverHW] Joint '%s' startup position %.6f rad out of limits [%.6f, %.6f].",
                                   jc.name.c_str(),
@@ -771,6 +795,9 @@ void CanDriverHW::configureLifecycleCoordinator()
             return lifecycleDriverOps_.enableHealthy(detail);
         },
         [this](std::string *detail) {
+            if (!startupLimitCalibrationReady(detail)) {
+                return false;
+            }
             return lifecycleDriverOps_.motionHealthy(detail);
         },
         [this]() {
@@ -1042,6 +1069,9 @@ bool CanDriverHW::commitLimits(uint16_t motorId,
         joint.limits.has_position_limits = true;
         joint.limits.min_position = baseMin;
         joint.limits.max_position = baseMax;
+        if (joint.startupPositionOutsideLimits && !positionOutsideLimits(joint)) {
+            joint.startupPositionOutsideLimits = false;
+        }
         jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
         return true;
     }
@@ -1340,6 +1370,15 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
         return;
     }
+    std::string calibrationDetail;
+    if (!startupLimitCalibrationReady(&calibrationDetail)) {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
+        ROS_WARN_THROTTLE(1.0,
+                          "[CanDriverHW] Blocking motion while startup calibration limit is unresolved: %s",
+                          calibrationDetail.empty() ? "unknown reason" : calibrationDetail.c_str());
+        return;
+    }
     if (!commandGate_.consumeFreshCommandLatchIfSatisfied()) {
         std::lock_guard<std::mutex> lock(jointStateMutex_);
         std::fill(commandValidBuffer_.begin(), commandValidBuffer_.end(), 0);
@@ -1502,7 +1541,32 @@ bool CanDriverHW::lifecycleHealthHealthy(std::string *detail) const
         return lifecycleDriverOps_.enableHealthy(detail);
     }
     if (mode == can_driver::SystemOpMode::Running) {
+        if (!startupLimitCalibrationReady(detail)) {
+            return false;
+        }
         return lifecycleDriverOps_.motionHealthy(detail);
+    }
+    return true;
+}
+
+bool CanDriverHW::startupLimitCalibrationReady(std::string *detail) const
+{
+    std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+    for (const auto &joint : joints_) {
+        if (!joint.startupPositionOutsideLimits) {
+            continue;
+        }
+        if (!positionOutsideLimits(joint)) {
+            continue;
+        }
+        if (detail != nullptr) {
+            std::ostringstream oss;
+            oss << "joint '" << joint.name << "' started outside limits and is still at "
+                << joint.pos << " outside [" << joint.limits.min_position
+                << ", " << joint.limits.max_position << "]";
+            *detail = oss.str();
+        }
+        return false;
     }
     return true;
 }
