@@ -823,6 +823,9 @@ void CanDriverHW::configureLifecycleCoordinator()
         [this](const std::string &device) {
             return applyInitialModes(device);
         },
+        [this](const std::string &device) {
+            return preloadStartupPositionTargets(device);
+        },
     });
 }
 
@@ -1283,6 +1286,73 @@ bool CanDriverHW::applyInitialModes(const std::string &deviceFilter)
                      jc.name.c_str());
         }
     }
+    return allOk;
+}
+
+bool CanDriverHW::preloadStartupPositionTargets(const std::string &deviceFilter)
+{
+    struct StartupPositionTarget {
+        MotorActionExecutor::Target target;
+        can_driver::PreparedCommandRoute route{can_driver::PreparedCommandRoute::Position};
+        int32_t rawPosition{0};
+        double position{0.0};
+    };
+
+    std::vector<StartupPositionTarget> targets;
+    {
+        std::lock_guard<std::mutex> lock(jointStateMutex_);
+        for (auto &joint : joints_) {
+            if (!deviceFilter.empty() && joint.canDevice != deviceFilter) {
+                continue;
+            }
+            if (!can_driver::controlModeUsesPositionSemantics(joint.controlMode)) {
+                continue;
+            }
+
+            joint.hasDirectPosCmd = false;
+            joint.posCmd = joint.pos;
+
+            int32_t rawPosition = 0;
+            if (!can_driver::safe_command::scaleAndClampToInt32(
+                    joint.pos,
+                    can_driver::effectivePositionScale(joint),
+                    joint.name + ".startup_hold_position",
+                    rawPosition)) {
+                return false;
+            }
+
+            const auto mode = can_driver::axisControlModeFromString(joint.controlMode);
+            targets.push_back(StartupPositionTarget{
+                makeMotorTarget(joint),
+                can_driver::controlModeDispatchRoute(mode),
+                rawPosition,
+                joint.pos,
+            });
+        }
+    }
+
+    bool allOk = true;
+    for (const auto &target : targets) {
+        const auto status = motorActionExecutor_.execute(
+            target.target,
+            [&target](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
+                if (target.route == can_driver::PreparedCommandRoute::Csp) {
+                    return proto->quickSetPosition(id, target.rawPosition);
+                }
+                return proto->setPosition(id, target.rawPosition);
+            },
+            "Preload startup position target");
+        if (status != MotorActionExecutor::Status::Ok) {
+            ROS_ERROR("[CanDriverHW] Failed to preload startup position target for joint '%s'.",
+                      target.target.name.c_str());
+            allOk = false;
+        } else {
+            ROS_INFO("[CanDriverHW] Preloaded startup position target %.6f for joint '%s'.",
+                     target.position,
+                     target.target.name.c_str());
+        }
+    }
+
     return allOk;
 }
 

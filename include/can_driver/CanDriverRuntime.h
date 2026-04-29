@@ -31,6 +31,7 @@ public:
         std::function<bool(const std::string &)> sync_startup_position_and_commands;
         std::function<bool(const std::string &)> apply_pp_default_velocities;
         std::function<bool(const std::string &)> apply_initial_modes;
+        std::function<bool(const std::string &)> preload_position_targets;
     };
 
     CanDriverRuntime();

@@ -110,6 +110,16 @@ OperationalCoordinator::Result CanDriverRuntime::initializeLifecycleDevice(
         }
         return enableResult;
     }
+    if (lifecycleHooks_.preload_position_targets &&
+        !lifecycleHooks_.preload_position_targets(device)) {
+        const auto rollback = lifecycleDriverOps_.shutdownDevice(device);
+        if (!rollback.ok) {
+            ROS_ERROR("[CanDriverRuntime] Failed to roll back enabled device '%s' after target preload failure: %s",
+                      device.c_str(),
+                      rollback.message.c_str());
+        }
+        return {false, "Failed to preload startup position targets on " + device};
+    }
     active_.store(true, std::memory_order_release);
     return {true, "initialized (armed)"};
 }

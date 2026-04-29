@@ -205,6 +205,7 @@ private:
     bool applyDeviceProtocolConfig(const std::string &deviceFilter = std::string());
     bool applyInitialModes(const std::string &deviceFilter = std::string());
     bool applyPerAxisPpDefaultVelocities(const std::string &deviceFilter = std::string());
+    bool preloadStartupPositionTargets(const std::string &deviceFilter = std::string());
     void configureCommandGate();
     void configureLifecycleCoordinator();
     void holdCommandsForLifecycleTransition();

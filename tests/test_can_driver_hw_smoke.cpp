@@ -1657,6 +1657,9 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastModeMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastMode(), CanProtocol::MotorMode::CSP);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 16384);
 
     for (int i = 0; i < 20 && !gotState; ++i) {
         ros::Duration(0.01).sleep();
@@ -1982,7 +1985,7 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
 
     const int32_t expectedRaw =
         static_cast<int32_t>(std::llround(1.0 / (2.0 * M_PI / 65536.0)));
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->positionCalls(), 0);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), expectedRaw);
@@ -2024,7 +2027,7 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointClampsCommandToConfiguredPositionLim
 
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.5));
 
@@ -2065,7 +2068,7 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointAppliesMaxPositionStepLimit)
 
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.2));
 
@@ -2856,7 +2859,7 @@ TEST_F(CanDriverHWSmokeTest, SetModeServiceUpdatesRuntimeRoutingToVelocity)
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 13038);
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
 
     spinner.stop();
 }
@@ -3028,7 +3031,7 @@ TEST_F(CanDriverHWSmokeTest, ResumeAllowsAlignedCspTargetWithoutCommandChange)
 
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 1024);
 }
