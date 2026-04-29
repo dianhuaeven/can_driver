@@ -277,6 +277,20 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
         if (!parseDirectionSign(jv, jc.name, &jc.directionSign, errorMsg)) {
             return false;
         }
+        if (jv.hasMember("pp_position_default_velocity")) {
+            if (!parsePositiveOptionalDouble(jv, "pp_position_default_velocity", jc.name,
+                                             &jc.ppPositionDefaultVelocity, errorMsg)) {
+                return false;
+            }
+            jc.hasPpPositionDefaultVelocity = true;
+        }
+        if (jv.hasMember("pp_csp_default_velocity")) {
+            if (!parsePositiveOptionalDouble(jv, "pp_csp_default_velocity", jc.name,
+                                             &jc.ppCspDefaultVelocity, errorMsg)) {
+                return false;
+            }
+            jc.hasPpCspDefaultVelocity = true;
+        }
         if (!parsePositiveOptionalDouble(jv, "ip_max_velocity", jc.name,
                                          &jc.ipMaxVelocity, errorMsg)) {
             return false;

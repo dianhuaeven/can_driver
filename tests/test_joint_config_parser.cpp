@@ -311,6 +311,24 @@ TEST(JointConfigParser, ParseReadsExplicitScales)
     EXPECT_DOUBLE_EQ(out[0].velocityScale, 0.02);
 }
 
+TEST(JointConfigParser, ParseReadsPerJointPpDefaultVelocities)
+{
+    XmlRpc::XmlRpcValue motorId(17);
+    auto joint = makeJointBase("joint_pp_defaults", motorId, "PP");
+    joint["pp_position_default_velocity"] = 0.04;
+    joint["pp_csp_default_velocity"] = 0.05;
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_TRUE(out[0].hasPpPositionDefaultVelocity);
+    EXPECT_TRUE(out[0].hasPpCspDefaultVelocity);
+    EXPECT_DOUBLE_EQ(out[0].ppPositionDefaultVelocity, 0.04);
+    EXPECT_DOUBLE_EQ(out[0].ppCspDefaultVelocity, 0.05);
+}
+
 TEST(JointConfigParser, ParseReadsPositiveDirectionSign)
 {
     XmlRpc::XmlRpcValue motorId(13);

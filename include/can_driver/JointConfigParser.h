@@ -25,6 +25,10 @@ struct ParsedJointConfig {
     double positionScale{1.0};           ///< 位置单位换算比例
     double velocityScale{1.0};           ///< 速度单位换算比例
     double directionSign{1.0};           ///< 方向修正，仅允许 1 或 -1
+    double ppPositionDefaultVelocity{0.0}; ///< PP position 默认速度，关节单位/s
+    double ppCspDefaultVelocity{0.0};      ///< PP CSP 默认速度，关节单位/s
+    bool hasPpPositionDefaultVelocity{false};
+    bool hasPpCspDefaultVelocity{false};
     double ipMaxVelocity{1.0};           ///< IP executor 最大速度（rad/s）
     double ipMaxAcceleration{2.0};       ///< IP executor 最大加速度（rad/s^2）
     double ipMaxJerk{10.0};              ///< IP executor 最大 jerk（rad/s^3）

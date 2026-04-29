@@ -143,8 +143,15 @@ can_driver_node:
       protocol: PP
       can_device: canable1
       control_mode: csp
-      position_scale: 65536  # 16-bit 编码器，PPR → 驱动自动换算为 2π/65536 rad/count
-      velocity_scale: 65536
+      # 夹爪在 URDF/MoveIt 中是 prismatic，命令单位是 m。
+      # 这里不能填 65536；应填写 raw * scale = m。
+      # 当前按实测 141.9 deg 电机转角 = 46 mm 夹爪行程配置：
+      # 0.046 / (65536 * 141.9 / 360) = 1.7807297172304439e-6 m/count。
+      # 若实机传动比不同，只校准这两个 scale。
+      position_scale: 0.0000017807297172304439
+      velocity_scale: 0.0000017807297172304439
+      pp_position_default_velocity: 0.05
+      pp_csp_default_velocity: 0.05
 
     # --- 底盘履带关节（DM 协议，速度模式）---
     # 达妙履带只作为 velocity 语义关节接入，由协议后端自行决定具体报文格式。

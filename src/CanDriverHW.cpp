@@ -632,6 +632,10 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.positionScale = p.positionScale;
         jc.velocityScale = p.velocityScale;
         jc.directionSign = p.directionSign;
+        jc.ppPositionDefaultVelocity = p.ppPositionDefaultVelocity;
+        jc.ppCspDefaultVelocity = p.ppCspDefaultVelocity;
+        jc.hasPpPositionDefaultVelocity = p.hasPpPositionDefaultVelocity;
+        jc.hasPpCspDefaultVelocity = p.hasPpCspDefaultVelocity;
         jc.ipMaxVelocity = p.ipMaxVelocity;
         jc.ipMaxAcceleration = p.ipMaxAcceleration;
         jc.ipMaxJerk = p.ipMaxJerk;
@@ -1273,18 +1277,28 @@ bool CanDriverHW::applyPerAxisPpDefaultVelocities(const std::string &deviceFilte
 
         for (const auto jointIndex : group.jointIndices) {
             const auto &joint = joints_[jointIndex];
+            const double positionDefaultVelocity =
+                joint.hasPpPositionDefaultVelocity ? joint.ppPositionDefaultVelocity
+                                                   : ppPositionDefaultVelocityRadS_;
+            const double cspDefaultVelocity =
+                joint.hasPpCspDefaultVelocity ? joint.ppCspDefaultVelocity
+                                              : ppCspDefaultVelocityRadS_;
             int32_t rawVelocity = 0;
-            if (!can_driver::safe_command::scaleAndClampToInt32(ppPositionDefaultVelocityRadS_,
+            if (!can_driver::safe_command::scaleAndClampToInt32(positionDefaultVelocity,
                                                                 joint.velocityScale,
-                                                                joint.name + ".pp_position_default_velocity_rad_s",
+                                                                joint.hasPpPositionDefaultVelocity
+                                                                    ? joint.name + ".pp_position_default_velocity"
+                                                                    : joint.name + ".pp_position_default_velocity_rad_s",
                                                                 rawVelocity)) {
                 return false;
             }
             protocol->setMotorDefaultPositionVelocityRaw(joint.motorId, rawVelocity);
 
-            if (!can_driver::safe_command::scaleAndClampToInt32(ppCspDefaultVelocityRadS_,
+            if (!can_driver::safe_command::scaleAndClampToInt32(cspDefaultVelocity,
                                                                 joint.velocityScale,
-                                                                joint.name + ".pp_csp_default_velocity_rad_s",
+                                                                joint.hasPpCspDefaultVelocity
+                                                                    ? joint.name + ".pp_csp_default_velocity"
+                                                                    : joint.name + ".pp_csp_default_velocity_rad_s",
                                                                 rawVelocity)) {
                 return false;
             }
