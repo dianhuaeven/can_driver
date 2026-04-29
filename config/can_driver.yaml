@@ -39,6 +39,12 @@ can_driver_node:
   # 同时校验是否落在 URDF/rosparam 限位范围内；超限将拒绝激活驱动。
   startup_position_sync_timeout_sec: 1.0
 
+  # 校准专用：允许 init 时当前位置临时落在 position/csp 关节限位外。
+  # true  只放开 init，方便后续 set_zero/apply_limits；release/run 和运动命令仍会被阻断，
+  #       直到当前反馈位置重新落入已生效限位。
+  # false 保持默认安全行为：启动位置超限直接拒绝 init。
+  allow_startup_position_outside_limits_for_calibration: false
+
   # 安全策略：检测到故障位时自动发送一次 Stop，并阻断后续运动命令。
   # 注意：该策略不会自动 Disable，便于故障排查时保持驱动在线。
   safety_stop_on_fault: true

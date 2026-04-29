@@ -1868,6 +1868,85 @@ TEST_F(CanDriverHWSmokeTest, CspInitRejectsStartupPositionOutsideConfiguredLimit
     EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 0);
 }
 
+TEST_F(CanDriverHWSmokeTest, CspCalibrationInitAllowsStartupPositionOutsideLimitsButBlocksRelease)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(1.2));
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_calibration_blocks_release"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("allow_startup_position_outside_limits_for_calibration", true);
+    setPositionLimits(pnh, "test_arm", -1.0, 1.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    auto &coordinator = hw.operationalCoordinator();
+    const auto initResult = coordinator.RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+    EXPECT_EQ(fakeDm->protocol()->setModeCalls(), 1);
+
+    const auto releaseResult = coordinator.RequestRelease();
+    EXPECT_FALSE(releaseResult.ok);
+    EXPECT_NE(releaseResult.message.find("started outside limits"), std::string::npos);
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Armed);
+}
+
+TEST_F(CanDriverHWSmokeTest, CspCalibrationApplyLimitsClearsStartupBlockAndAllowsRelease)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(1.2));
+
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_csp_calibration_apply_limits"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("allow_startup_position_outside_limits_for_calibration", true);
+    setPositionLimits(pnh, "test_arm", -1.0, 1.0);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    auto &coordinator = hw.operationalCoordinator();
+    const auto initResult = coordinator.RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    const auto blockedRelease = coordinator.RequestRelease();
+    ASSERT_FALSE(blockedRelease.ok);
+    EXPECT_NE(blockedRelease.message.find("started outside limits"), std::string::npos);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::ApplyLimits>(
+        pnh.resolveName("apply_limits"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::ApplyLimits srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.min_position_rad = -1.5;
+    srv.request.max_position_rad = 1.5;
+    srv.request.use_urdf_limits = false;
+    srv.request.apply_to_motor = false;
+    srv.request.require_current_inside_limits = true;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 1.2, 1e-4);
+    EXPECT_DOUBLE_EQ(srv.response.applied_min_rad, -1.5);
+    EXPECT_DOUBLE_EQ(srv.response.applied_max_rad, 1.5);
+
+    const auto releaseResult = coordinator.RequestRelease();
+    EXPECT_TRUE(releaseResult.ok) << releaseResult.message;
+    EXPECT_EQ(coordinator.mode(), can_driver::SystemOpMode::Running);
+
+    spinner.stop();
+}
+
 TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
 {
     auto fakeDm = std::make_shared<FakeDeviceManager>();
