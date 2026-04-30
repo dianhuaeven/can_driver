@@ -68,9 +68,8 @@ public:
             std::lock_guard<std::mutex> devLock(*devMutex);
             for (const std::size_t index : group.jointIndices) {
                 const auto &joint = (*joints)[index];
-                snapshots[index].pos =
-                    static_cast<double>(proto->getPosition(joint.motorId)) *
-                    can_driver::effectivePositionScale(joint);
+                snapshots[index].pos = can_driver::rawPositionToJointPosition(
+                    joint, proto->getPosition(joint.motorId));
                 snapshots[index].vel =
                     static_cast<double>(proto->getVelocity(joint.motorId)) *
                     can_driver::effectiveVelocityScale(joint);
@@ -185,9 +184,13 @@ public:
             }
 
             const double scale = can_driver::controlModeScale(joint, mode);
+            const double protocolCmdValue =
+                can_driver::controlModeUsesPositionSemantics(mode)
+                    ? can_driver::jointPositionToRawPositionValue(joint, cmdValue)
+                    : cmdValue;
             (*commandValidBuffer)[index] = static_cast<uint8_t>(
                 can_driver::safe_command::scaleAndClampToInt32(
-                    cmdValue, scale, joint.name, (*rawCommandBuffer)[index]));
+                    protocolCmdValue, scale, joint.name, (*rawCommandBuffer)[index]));
             prepared.valid = ((*commandValidBuffer)[index] != 0);
         }
     }
@@ -439,6 +442,8 @@ public:
             message.position = snapshot.position;
             message.velocity = snapshot.velocity;
             message.current = snapshot.current;
+            message.joint_position = joint.pos;
+            message.joint_velocity = joint.vel;
             message.mode =
                 snapshot.modeValid ? snapshot.mode : can_driver::MotorState::MODE_UNKNOWN;
             if (snapshot.statusValid) {
@@ -518,11 +523,14 @@ private:
             joint.hasDirectPosCmd = false;
             joint.hasDirectVelCmd = false;
             joint.stopIssuedOnFault = false;
-            if (can_driver::controlModeUsesVelocitySemantics(joint.controlMode)) {
+            const bool usesPositionSemantics =
+                can_driver::controlModeUsesPositionSemantics(joint.controlMode);
+            if (!usesPositionSemantics) {
                 joint.velCmd = 0.0;
             } else {
                 joint.posCmd = joint.pos;
             }
+            joint.requireCommandAlignment = usesPositionSemantics;
             (*commandValidBuffer)[index] = 0;
         }
     }

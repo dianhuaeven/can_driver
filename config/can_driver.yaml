@@ -67,8 +67,9 @@ can_driver_node:
   # 默认 false；仅在 vcan/loopback 测试场景下建议打开。
   init_loopback: false
 
-  # PP 零点本地持久化：将 zero offset 保存到本机文件，并在下次初始化时自动恢复。
-  # 这与 apply_to_motor 不同；即使不写电机 EEPROM，也可以只在驱动侧持久保存。
+  # PP 零点本地持久化：将 zero offset 保存到本机文件。
+  # 下次初始化时只作为驱动侧软件 offset 生效，不再写 0x3B。
+  # 只有显式调用 set_zero/apply_to_motor=true 才会写电机 0x3B。
   pp_local_zero_offset_persistence_enabled: true
   # apply_to_motor=true 时，是否额外发送 0x4D 持久化到电机非易失存储。
   # false: 立即写入当前电机 offset，但不做 EEPROM 持久化，也不会因为 0x4D 失败而回滚

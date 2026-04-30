@@ -394,8 +394,8 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 }
 
                 snapshots[i].pos = feedback.positionValid
-                                       ? static_cast<double>(feedback.position) *
-                                             can_driver::effectivePositionScale(jc)
+                                       ? can_driver::rawPositionToJointPosition(
+                                             jc, feedback.position)
                                        : 0.0;
                 snapshots[i].vel = feedback.velocityValid
                                        ? static_cast<double>(feedback.velocity) *
@@ -523,9 +523,8 @@ bool CanDriverHW::syncStartupPositionAndCommands(const std::string &deviceFilter
                 std::lock_guard<std::mutex> devLock(*devMutex);
                 for (const std::size_t i : group.jointIndices) {
                     const auto &jc = joints_[i];
-                    snapshots[i].pos =
-                        static_cast<double>(proto->getPosition(jc.motorId)) *
-                        can_driver::effectivePositionScale(jc);
+                    snapshots[i].pos = can_driver::rawPositionToJointPosition(
+                        jc, proto->getPosition(jc.motorId));
                     snapshots[i].vel =
                         static_cast<double>(proto->getVelocity(jc.motorId)) *
                         can_driver::effectiveVelocityScale(jc);
@@ -667,6 +666,10 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
         jc.ecbIp = p.ecbIp;
         jc.ecbAutoDiscovery = p.ecbAutoDiscovery;
         jc.ecbRefreshMs = p.ecbRefreshMs;
+        if (const auto zeroIt = jointZeroOffsetRadByMotorId_.find(motorId);
+            zeroIt != jointZeroOffsetRadByMotorId_.end()) {
+            jc.zeroOffsetRad = zeroIt->second;
+        }
 
         joints_.push_back(jc);
         jointIndexByName_[jc.name] = joints_.size() - 1;
@@ -873,14 +876,17 @@ void CanDriverHW::configureMotorMaintenanceService(MotorMaintenanceService &serv
         [this](uint16_t motorId, can_driver::AxisControlMode mode) {
             return commitModeSwitch(motorId, mode);
         },
-        [this](uint16_t motorId, double zeroOffset, double previousZeroOffset) {
-            return commitZero(motorId, zeroOffset, previousZeroOffset);
+        [this](uint16_t motorId,
+               double zeroOffset,
+               double previousZeroOffset,
+               bool applyToMotor) {
+            return commitZero(motorId, zeroOffset, previousZeroOffset, applyToMotor);
         },
         [this](uint16_t motorId, double* zeroOffset) {
             return getZeroOffset(motorId, zeroOffset);
         },
-        [this](uint16_t motorId, double baseMin, double baseMax, double zeroOffset) {
-            return commitLimits(motorId, baseMin, baseMax, zeroOffset);
+        [this](uint16_t motorId, double baseMin, double baseMax) {
+            return commitLimits(motorId, baseMin, baseMax);
         },
         [this](const JointConfig &joint, can_driver::SharedDriverState::AxisFeedbackState *feedback) {
             return getFreshAxisFeedback(joint, feedback);
@@ -1041,18 +1047,63 @@ bool CanDriverHW::getZeroOffset(uint16_t motorId, double* zeroOffset) const
 
 bool CanDriverHW::commitZero(uint16_t motorId,
                              double zeroOffset,
-                             double previousZeroOffset)
+                             double previousZeroOffset,
+                             bool applyToMotor)
 {
     std::lock_guard<std::mutex> lock(jointStateMutex_);
-    for (auto &joint : joints_) {
+    for (std::size_t i = 0; i < joints_.size(); ++i) {
+        auto &joint = joints_[i];
         if (static_cast<uint16_t>(joint.motorId) != motorId) {
             continue;
         }
-        jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
+        const double oldLocalZeroOffset = joint.zeroOffsetRad;
+        const double oldPosition = joint.pos;
+        const double oldPositionCommand = joint.posCmd;
+        const bool oldHasDirectPosCmd = joint.hasDirectPosCmd;
+        const bool oldHasDirectVelCmd = joint.hasDirectVelCmd;
+        const bool oldRequireCommandAlignment = joint.requireCommandAlignment;
+        const uint8_t oldCommandValid =
+            (i < commandValidBuffer_.size()) ? commandValidBuffer_[i] : 0;
+
+        const double committedLocalZeroOffset = applyToMotor ? 0.0 : zeroOffset;
+        const double positionDelta =
+            applyToMotor ? (zeroOffset - previousZeroOffset - oldLocalZeroOffset)
+                         : (committedLocalZeroOffset - oldLocalZeroOffset);
+        joint.zeroOffsetRad = committedLocalZeroOffset;
+        jointZeroOffsetRadByMotorId_[motorId] = committedLocalZeroOffset;
+
+        if (std::isfinite(joint.pos) && std::isfinite(positionDelta)) {
+            joint.pos += positionDelta;
+        }
+        joint.posCmd = joint.pos;
+        joint.hasDirectPosCmd = false;
+        joint.hasDirectVelCmd = false;
+        joint.requireCommandAlignment = true;
+        if (i < commandValidBuffer_.size()) {
+            commandValidBuffer_[i] = 0;
+        }
+
         if (ppLocalZeroOffsetPersistenceEnabled_ && !savePersistedLocalZeroOffsets()) {
-            jointZeroOffsetRadByMotorId_[motorId] = previousZeroOffset;
+            jointZeroOffsetRadByMotorId_[motorId] = oldLocalZeroOffset;
+            joint.zeroOffsetRad = oldLocalZeroOffset;
+            joint.pos = oldPosition;
+            joint.posCmd = oldPositionCommand;
+            joint.hasDirectPosCmd = oldHasDirectPosCmd;
+            joint.hasDirectVelCmd = oldHasDirectVelCmd;
+            joint.requireCommandAlignment = oldRequireCommandAlignment;
+            if (i < commandValidBuffer_.size()) {
+                commandValidBuffer_[i] = oldCommandValid;
+            }
             return false;
         }
+        ROS_INFO("[CanDriverHW] Committed zero for motor %u: apply_to_motor=%s, "
+                 "requested_offset=%.9f, previous_offset=%.9f, active_local_offset=%.9f, file='%s'.",
+                 static_cast<unsigned>(motorId),
+                 applyToMotor ? "true" : "false",
+                 zeroOffset,
+                 previousZeroOffset,
+                 committedLocalZeroOffset,
+                 ppLocalZeroOffsetFilePath_.c_str());
         return true;
     }
     return false;
@@ -1060,8 +1111,7 @@ bool CanDriverHW::commitZero(uint16_t motorId,
 
 bool CanDriverHW::commitLimits(uint16_t motorId,
                                double baseMin,
-                               double baseMax,
-                               double zeroOffset)
+                               double baseMax)
 {
     std::lock_guard<std::mutex> lock(jointStateMutex_);
     for (auto &joint : joints_) {
@@ -1075,7 +1125,6 @@ bool CanDriverHW::commitLimits(uint16_t motorId,
         if (joint.startupPositionOutsideLimits && !positionOutsideLimits(joint)) {
             joint.startupPositionOutsideLimits = false;
         }
-        jointZeroOffsetRadByMotorId_[motorId] = zeroOffset;
         return true;
     }
     return false;
@@ -1107,29 +1156,7 @@ bool CanDriverHW::applyPersistedPpZeroOffsets(const std::string &deviceFilter)
             continue;
         }
 
-        int32_t rawOffset = 0;
-        if (!can_driver::safe_command::scaleAndClampToInt32(
-                it->second,
-                can_driver::effectivePositionScale(joint),
-                joint.name + ".persisted_zero_offset",
-                rawOffset)) {
-            ROS_ERROR("[CanDriverHW] Failed to convert persisted zero offset for joint '%s'.",
-                      joint.name.c_str());
-            return false;
-        }
-
-        const auto status = motorActionExecutor_.execute(
-            makeMotorTarget(joint),
-            [rawOffset](const std::shared_ptr<CanProtocol> &proto, MotorID id) {
-                return proto->setPositionOffset(id, rawOffset);
-            },
-            "Restore persisted zero offset");
-        if (status != MotorActionExecutor::Status::Ok) {
-            ROS_ERROR("[CanDriverHW] Failed to restore persisted zero offset for joint '%s'.",
-                      joint.name.c_str());
-            return false;
-        }
-        ROS_INFO("[CanDriverHW] Restored persisted zero offset %.6f rad for joint '%s'.",
+        ROS_INFO("[CanDriverHW] Loaded local software zero offset %.6f rad for joint '%s'.",
                  it->second,
                  joint.name.c_str());
         appliedAny = true;
@@ -1218,12 +1245,14 @@ void CanDriverHW::holdCommandsForLifecycleTransition()
         auto &jc = joints_[i];
         jc.hasDirectPosCmd = false;
         jc.hasDirectVelCmd = false;
-        if (can_driver::controlModeUsesVelocitySemantics(jc.controlMode)) {
+        const bool usesPositionSemantics =
+            can_driver::controlModeUsesPositionSemantics(jc.controlMode);
+        if (!usesPositionSemantics) {
             jc.velCmd = 0.0;
         } else {
             jc.posCmd = jc.pos;
         }
-        jc.requireCommandAlignment = false;
+        jc.requireCommandAlignment = usesPositionSemantics;
         commandValidBuffer_[i] = 0;
     }
 }
@@ -1311,10 +1340,11 @@ bool CanDriverHW::preloadStartupPositionTargets(const std::string &deviceFilter)
 
             joint.hasDirectPosCmd = false;
             joint.posCmd = joint.pos;
+            joint.requireCommandAlignment = true;
 
             int32_t rawPosition = 0;
             if (!can_driver::safe_command::scaleAndClampToInt32(
-                    joint.pos,
+                    can_driver::jointPositionToRawPositionValue(joint, joint.pos),
                     can_driver::effectivePositionScale(joint),
                     joint.name + ".startup_hold_position",
                     rawPosition)) {

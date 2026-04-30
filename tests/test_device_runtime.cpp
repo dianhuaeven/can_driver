@@ -120,10 +120,34 @@ TEST_F(DeviceRuntimeTest, DrainsQueuedFramesInPriorityOrder)
 
     const auto frames = transport->snapshotFrames();
     ASSERT_EQ(frames.size(), 4u);
-    EXPECT_EQ(frames[0].id, 0x01u);
-    EXPECT_EQ(frames[1].id, 0x02u);
-    EXPECT_EQ(frames[2].id, 0x03u);
+    EXPECT_EQ(frames[0].id, 0x02u);
+    EXPECT_EQ(frames[1].id, 0x03u);
+    EXPECT_EQ(frames[2].id, 0x01u);
     EXPECT_EQ(frames[3].id, 0x04u);
+}
+
+TEST_F(DeviceRuntimeTest, QueryGetsTurnDuringContinuousControlTraffic)
+{
+    auto transport = std::make_shared<MockTransport>();
+    DeviceRuntime::Options options;
+    options.autostart = false;
+    options.maxConsecutiveControlBeforeQuery = 3;
+    DeviceRuntime runtime(transport, "test_can0", options);
+
+    for (std::uint32_t i = 0; i < 8; ++i) {
+        runtime.submit({makeFrame(0x100 + i), CanTxDispatcher::Category::Control, "control"});
+    }
+    runtime.submit({makeFrame(0x20), CanTxDispatcher::Category::Query, "query"});
+
+    runtime.start();
+    ASSERT_TRUE(runtime.waitUntilIdleFor(std::chrono::milliseconds(500)));
+
+    const auto frames = transport->snapshotFrames();
+    ASSERT_EQ(frames.size(), 9u);
+    EXPECT_EQ(frames[0].id, 0x100u);
+    EXPECT_EQ(frames[1].id, 0x101u);
+    EXPECT_EQ(frames[2].id, 0x102u);
+    EXPECT_EQ(frames[3].id, 0x20u);
 }
 
 TEST_F(DeviceRuntimeTest, DropsQueryFramesWhenQueryQueueIsFull)

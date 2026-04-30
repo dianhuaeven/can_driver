@@ -9,12 +9,15 @@
   <arg name="config_file" default="$(find can_driver)/config/can_driver.yaml"/>
   <arg name="controllers_file" default="$(find can_driver)/config/ros_controllers.yaml"/>
   <arg name="start_controllers" default="joint_state_controller arm_controller wheel_controller"/>
+  <arg name="pp_local_zero_offset_file" default="$(find can_driver)/config/can_driver_pp_zero_offsets.txt"/>
 
   <!-- ECB SDK 依赖该路径定位 logtool；对非 ECB 协议无副作用。 -->
   <env name="ACTUATOR_TOOL_PATH" value="$(find can_driver)/lib/innfos-cpp-sdk/tools/logtool/linux_x86_64"/>
 
   <!-- 1. 加载硬件参数（关节映射、控制频率） -->
   <rosparam file="$(arg config_file)" command="load"/>
+  <param name="can_driver_node/pp_local_zero_offset_file"
+         value="$(arg pp_local_zero_offset_file)"/>
 
   <!-- 2. 加载控制器参数（仅在 use_controllers=true 时加载） -->
   <rosparam file="$(arg controllers_file)" command="load"

@@ -392,8 +392,7 @@ bool MotorMaintenanceService::resolveCurrentReportedPosition(
         }
     }
 
-    *currentPositionRad =
-        static_cast<double>(rawPos) * can_driver::effectivePositionScale(target);
+    *currentPositionRad = can_driver::rawPositionToJointPosition(target, rawPos);
     return true;
 }
 
@@ -410,14 +409,20 @@ bool MotorMaintenanceService::resolveCurrentZeroOffset(const JointConfig& target
     }
     *zeroOffsetRad = 0.0;
 
-    if (applyToMotor && getProtocol_) {
-        auto proto = getProtocol_(target.canDevice, target.protocol);
-        int32_t offsetRaw = 0;
-        if (proto && proto->readPositionOffset(target.motorId, &offsetRaw)) {
-            *zeroOffsetRad =
-                static_cast<double>(offsetRaw) * can_driver::effectivePositionScale(target);
-            return true;
+    if (applyToMotor) {
+        if (getProtocol_) {
+            auto proto = getProtocol_(target.canDevice, target.protocol);
+            int32_t offsetRaw = 0;
+            if (proto && proto->readPositionOffset(target.motorId, &offsetRaw)) {
+                *zeroOffsetRad =
+                    static_cast<double>(offsetRaw) * can_driver::effectivePositionScale(target);
+                return true;
+            }
         }
+        if (message != nullptr) {
+            *message = "Failed to read current motor zero offset.";
+        }
+        return false;
     }
 
     if (getZeroOffset_ && getZeroOffset_(static_cast<uint16_t>(target.motorId), zeroOffsetRad)) {
@@ -470,13 +475,6 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
         }
         return false;
     }
-    if (useCurrentPositionAsZero && !applyToMotor) {
-        if (message != nullptr) {
-            *message = "Automatic zeroing requires apply_to_motor=true.";
-        }
-        return false;
-    }
-
     double currentReportedPositionRad = 0.0;
     bool hasFreshFeedback = false;
     if (!resolveCurrentReportedPosition(target,
@@ -503,10 +501,12 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
         *previousZeroOffsetRad = previousZeroOffset;
     }
 
-    const double currentPhysicalPositionRad =
-        currentReportedPositionRad - previousZeroOffset;
     const double resolvedZeroOffset =
-        useCurrentPositionAsZero ? -currentPhysicalPositionRad : zeroOffsetRad;
+        useCurrentPositionAsZero
+            ? (applyToMotor
+                   ? previousZeroOffset + target.zeroOffsetRad - currentReportedPositionRad
+                   : previousZeroOffset - currentReportedPositionRad)
+            : zeroOffsetRad;
     if (appliedZeroOffsetRad != nullptr) {
         *appliedZeroOffsetRad = resolvedZeroOffset;
     }
@@ -597,7 +597,8 @@ bool MotorMaintenanceService::SetZeroByMotorId(uint16_t motorId,
         }
     }
 
-    if (!commitZero_ || !commitZero_(motorId, resolvedZeroOffset, previousZeroOffset)) {
+    if (!commitZero_ ||
+        !commitZero_(motorId, resolvedZeroOffset, previousZeroOffset, applyToMotor)) {
         if (message != nullptr) {
             *message = "Failed to update local zero state.";
         }
@@ -729,12 +730,12 @@ bool MotorMaintenanceService::ApplyLimitsByMotorId(uint16_t motorId,
         int32_t rawLimitA = 0;
         int32_t rawLimitB = 0;
         if (!can_driver::safe_command::scaleAndClampToInt32(
-                resolvedMin,
+                can_driver::jointPositionToRawPositionValue(target, resolvedMin),
                 can_driver::effectivePositionScale(target),
                 target.name + ".min_limit",
                 rawLimitA) ||
             !can_driver::safe_command::scaleAndClampToInt32(
-                resolvedMax,
+                can_driver::jointPositionToRawPositionValue(target, resolvedMax),
                 can_driver::effectivePositionScale(target),
                 target.name + ".max_limit",
                 rawLimitB)) {
@@ -776,7 +777,7 @@ bool MotorMaintenanceService::ApplyLimitsByMotorId(uint16_t motorId,
     }
 
     if (!commitLimits_ ||
-        !commitLimits_(motorId, resolvedMin, resolvedMax, activeZeroOffset)) {
+        !commitLimits_(motorId, resolvedMin, resolvedMax)) {
         if (message != nullptr) {
             *message = "Failed to update local limit state.";
         }

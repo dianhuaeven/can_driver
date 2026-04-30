@@ -66,5 +66,10 @@ can_driver_node:
       protocol: PP
       can_device: canable1
       control_mode: csp
-      position_scale: 65536
-      velocity_scale: 65536
+      # 夹爪是 prismatic 关节，上层单位是 m；这里不能填 65536
+      # （65536 会被解析为 2π/65536 rad/count）。
+      # 与 can_driver.yaml 保持一致：raw * scale = finger travel in m。
+      position_scale: 0.0000017807297172304439
+      velocity_scale: 0.0000017807297172304439
+      pp_position_default_velocity: 0.05
+      pp_csp_default_velocity: 0.05

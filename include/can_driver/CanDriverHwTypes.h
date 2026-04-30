@@ -56,6 +56,7 @@ struct CanDriverJointConfig {
     double eff{0.0};
     double posCmd{0.0};
     double velCmd{0.0};
+    double zeroOffsetRad{0.0};
 
     double directPosCmd{0.0};
     double directVelCmd{0.0};

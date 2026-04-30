@@ -118,7 +118,11 @@ class MotorPanel:
 
     def update_state(self, msg: MotorState):
         if msg.position_valid:
-            position_si = float(msg.position) * self.position_scale
+            position_si = (
+                float(msg.joint_position)
+                if hasattr(msg, "joint_position")
+                else float(msg.position) * self.position_scale
+            )
             self.position.set(f"{position_si:.4f}")
             self.last_position_si = position_si
             self.position_valid_flag = True
@@ -127,7 +131,11 @@ class MotorPanel:
             self.position_valid_flag = False
 
         if msg.velocity_valid:
-            velocity_si = float(msg.velocity) * self.velocity_scale
+            velocity_si = (
+                float(msg.joint_velocity)
+                if hasattr(msg, "joint_velocity")
+                else float(msg.velocity) * self.velocity_scale
+            )
             self.velocity.set(f"{velocity_si:.4f}")
             self.last_velocity_si = velocity_si
             self.velocity_valid_flag = True
@@ -575,7 +583,7 @@ class RealtimeMotorUI:
         ttk.Button(
             row_zero2,
             text="当前位置归零并应用",
-            command=lambda: self._apply_zero_and_limits(force_auto_zero=True, force_apply_to_motor=True),
+            command=lambda: self._apply_zero_and_limits(force_auto_zero=True, force_apply_to_motor=False),
         ).pack(side=tk.LEFT, padx=4)
         ttk.Label(row_zero2, textvariable=self.zero_limit_result, foreground="#0b5d86").pack(
             side=tk.LEFT, padx=8

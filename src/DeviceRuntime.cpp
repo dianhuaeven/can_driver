@@ -304,27 +304,46 @@ bool DeviceRuntime::allQueuesEmptyLocked() const
 
 bool DeviceRuntime::popNextLocked(Request *request)
 {
-    if (!controlQueue_.empty()) {
-        *request = controlQueue_.front();
-        controlQueue_.pop_front();
-        return true;
-    }
     if (!recoverQueue_.empty()) {
         *request = recoverQueue_.front();
         recoverQueue_.pop_front();
+        consecutiveControlPops_ = 0;
         return true;
     }
     if (!configQueue_.empty()) {
         *request = configQueue_.front();
         configQueue_.pop_front();
+        consecutiveControlPops_ = 0;
+        return true;
+    }
+    if (shouldServiceQueryBeforeControlLocked()) {
+        *request = queryQueue_.front();
+        queryQueue_.pop_front();
+        consecutiveControlPops_ = 0;
+        return true;
+    }
+    if (!controlQueue_.empty()) {
+        *request = controlQueue_.front();
+        controlQueue_.pop_front();
+        ++consecutiveControlPops_;
         return true;
     }
     if (!queryQueue_.empty()) {
         *request = queryQueue_.front();
         queryQueue_.pop_front();
+        consecutiveControlPops_ = 0;
         return true;
     }
     return false;
+}
+
+bool DeviceRuntime::shouldServiceQueryBeforeControlLocked() const
+{
+    if (queryQueue_.empty() || controlQueue_.empty()) {
+        return false;
+    }
+    const std::size_t limit = options_.maxConsecutiveControlBeforeQuery;
+    return limit > 0 && consecutiveControlPops_ >= limit;
 }
 
 DeviceRuntime::Queue &DeviceRuntime::queueFor(Category category)

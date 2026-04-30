@@ -6,6 +6,8 @@ bool fault       # 故障标志
 int32 position   # 位置反馈（协议原始单位）
 int32 velocity   # 速度反馈（协议原始单位）
 int16 current    # 电流反馈（协议原始单位）
+float64 joint_position  # 驱动侧关节位置（SI/rad），已应用 direction_sign 与软件 zero offset
+float64 joint_velocity  # 驱动侧关节速度（SI/rad/s），已应用 direction_sign
 bool mode_valid      # mode 是否来自真实反馈
 bool status_valid    # enabled/fault 是否来自真实反馈
 bool position_valid  # position 是否来自真实反馈

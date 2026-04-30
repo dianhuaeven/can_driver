@@ -27,6 +27,8 @@ public:
         std::size_t maxBackpressureRetries{3};
         /// How long to sleep after maxBackpressureRetries consecutive EAGAIN.
         std::chrono::microseconds backpressureSleepUs{500};
+        /// Maximum consecutive control frames before a pending query gets a turn.
+        std::size_t maxConsecutiveControlBeforeQuery{8};
 
         bool autostart{true};
     };
@@ -72,6 +74,7 @@ private:
     void noteSharedSendResult(CanTransport::SendResult result);
     bool allQueuesEmptyLocked() const;
     bool popNextLocked(Request *request);
+    bool shouldServiceQueryBeforeControlLocked() const;
     Queue &queueFor(Category category);
     const Queue &queueFor(Category category) const;
     std::size_t maxDepthFor(Category category) const;
@@ -105,6 +108,7 @@ private:
     std::atomic<std::uint64_t> droppedConfigCount_{0};
     std::atomic<std::uint64_t> droppedQueryCount_{0};
     std::atomic<std::uint64_t> evictedControlCount_{0};
+    std::size_t consecutiveControlPops_{0};
 };
 
 #endif // CAN_DRIVER_DEVICE_RUNTIME_H

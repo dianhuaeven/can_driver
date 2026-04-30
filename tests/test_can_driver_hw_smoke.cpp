@@ -251,6 +251,13 @@ public:
         return lastQuickPosition_;
     }
 
+    void resetQuickPositionCalls()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        quickSetPositionCalls_ = 0;
+        lastQuickPosition_ = 0;
+    }
+
     uint16_t lastQuickPositionMotor() const
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -812,6 +819,11 @@ protected:
         return static_cast<int32_t>(std::llround(valueRad / (2.0 * M_PI / 65536.0)));
     }
 
+    static double pprRadiansFromRaw(int32_t raw)
+    {
+        return static_cast<double>(raw) * (2.0 * M_PI / 65536.0);
+    }
+
     static void setFreshEnabledFeedback(FakeDeviceManager &dm,
                                         const std::string &device,
                                         CanType protocol,
@@ -825,6 +837,31 @@ protected:
             key,
             [enabled, nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
                 feedback->feedbackSeen = true;
+                feedback->enabled = enabled;
+                feedback->enabledValid = true;
+                feedback->lastRxSteadyNs = nowNs;
+                feedback->lastValidStateSteadyNs = nowNs;
+            });
+    }
+
+    static void setFreshPositionFeedback(FakeDeviceManager &dm,
+                                         const std::string &device,
+                                         CanType protocol,
+                                         MotorID motorId,
+                                         int64_t rawPosition,
+                                         bool enabled)
+    {
+        dm.protocol()->setEnabledState(enabled);
+        dm.protocol()->setFeedbackPosition(rawPosition);
+        const auto key = can_driver::MakeAxisKey(device, protocol, motorId);
+        const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+        dm.sharedState()->mutateAxisFeedback(
+            key,
+            [rawPosition, enabled, nowNs](
+                can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+                feedback->feedbackSeen = true;
+                feedback->position = rawPosition;
+                feedback->positionValid = true;
                 feedback->enabled = enabled;
                 feedback->enabledValid = true;
                 feedback->lastRxSteadyNs = nowNs;
@@ -1669,6 +1706,8 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_EQ(latestState.motor_id, 0x05u);
     EXPECT_EQ(latestState.position, 16384);
     EXPECT_EQ(latestState.velocity, 512);
+    EXPECT_NEAR(latestState.joint_position, pprRadiansFromRaw(16384), 1e-4);
+    EXPECT_NEAR(latestState.joint_velocity, pprRadiansFromRaw(512), 1e-4);
     EXPECT_EQ(latestState.mode, can_driver::MotorState::MODE_CSP);
     EXPECT_TRUE(latestState.mode_valid);
     EXPECT_TRUE(latestState.status_valid);
@@ -1678,6 +1717,62 @@ TEST_F(CanDriverHWSmokeTest, InitCspJointSetsModeAndPublishesRawFeedbackFromPprC
     EXPECT_TRUE(latestState.feedback_fresh);
 
     spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, MotorStatesExposeSoftwareZeroOffsetJointPosition)
+{
+    const std::string persistFile =
+        uniqueTempFile("can_driver_motor_state_zero_offset");
+    {
+        std::ofstream out(persistFile, std::ios::trunc);
+        ASSERT_TRUE(out.is_open());
+        out << "5 -0.25\n";
+    }
+
+    const int32_t rawPosition = rawFromPprRadians(0.25);
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawPosition);
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_motor_state_zero_offset"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("motor_state_period_sec", 0.05);
+    pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+    pnh.setParam("pp_local_zero_offset_file", persistFile);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+
+    std::mutex stateMutex;
+    can_driver::MotorState latestState;
+    bool gotState = false;
+    ros::Subscriber stateSub = nh.subscribe<can_driver::MotorState>(
+        pnh.resolveName("motor_states"), 1,
+        [&stateMutex, &latestState, &gotState](const can_driver::MotorState::ConstPtr &msg) {
+            std::lock_guard<std::mutex> lock(stateMutex);
+            latestState = *msg;
+            gotState = msg->position_valid;
+        });
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    for (int i = 0; i < 20 && !gotState; ++i) {
+        ros::Duration(0.02).sleep();
+    }
+
+    ASSERT_TRUE(gotState);
+    EXPECT_EQ(latestState.position, rawPosition);
+    EXPECT_NEAR(latestState.joint_position,
+                pprRadiansFromRaw(rawPosition) - 0.25,
+                1e-4);
+
+    spinner.stop();
+    std::filesystem::remove(persistFile);
 }
 
 TEST_F(CanDriverHWSmokeTest, MotorStatesPreferSharedFeedbackOverConfiguredModeAndProtocolCache)
@@ -1977,6 +2072,12 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
     }
 
     std_msgs::Float64 msg;
+    msg.data = 0.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
     msg.data = 1.0;
     pub.publish(msg);
     ros::Duration(0.05).sleep();
@@ -1985,7 +2086,7 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointUsesQuickSetPositionWithPprScale)
 
     const int32_t expectedRaw =
         static_cast<int32_t>(std::llround(1.0 / (2.0 * M_PI / 65536.0)));
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->positionCalls(), 0);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), expectedRaw);
@@ -2021,13 +2122,19 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointClampsCommandToConfiguredPositionLim
     }
 
     std_msgs::Float64 msg;
+    msg.data = 0.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
     msg.data = 1.0;
     pub.publish(msg);
     ros::Duration(0.05).sleep();
 
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.5));
 
@@ -2062,13 +2169,19 @@ TEST_F(CanDriverHWSmokeTest, RunningCspJointAppliesMaxPositionStepLimit)
     }
 
     std_msgs::Float64 msg;
+    msg.data = 0.0;
+    pub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
     msg.data = 1.0;
     pub.publish(msg);
     ros::Duration(0.05).sleep();
 
     hw.write(ros::Time::now(), ros::Duration(0.01));
 
-    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 3);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPositionMotor(), 0x05u);
     EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.2));
 
@@ -2167,6 +2280,36 @@ TEST_F(CanDriverHWSmokeTest, SyncJointFeedbackAppliesNegativeDirectionSign)
     EXPECT_DOUBLE_EQ(joints[0].eff, 7.0);
 }
 
+TEST_F(CanDriverHWSmokeTest, SyncJointFeedbackAppliesSoftwareZeroOffset)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_arm";
+    joints[0].motorId = static_cast<MotorID>(0x05);
+    joints[0].protocol = CanType::PP;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "csp";
+    joints[0].positionScale = 2.0 * M_PI / 65536.0;
+    joints[0].velocityScale = 2.0 * M_PI / 65536.0;
+    joints[0].zeroOffsetRad = -0.25;
+
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+
+    std::vector<can_driver::CanDriverDeviceProtocolGroup> groups{
+        {"fake0", CanType::PP, {0}},
+    };
+    std::mutex jointStateMutex;
+
+    can_driver::CanDriverIoRuntime::SyncJointFeedback(*fakeDm,
+                                                      groups,
+                                                      &joints,
+                                                      &jointStateMutex);
+
+    std::lock_guard<std::mutex> lock(jointStateMutex);
+    EXPECT_NEAR(joints[0].pos, 0.0, 1e-4);
+}
+
 TEST_F(CanDriverHWSmokeTest, PrepareCommandsAppliesNegativeDirectionSignToPosition)
 {
     ros::Time::init();
@@ -2199,6 +2342,40 @@ TEST_F(CanDriverHWSmokeTest, PrepareCommandsAppliesNegativeDirectionSignToPositi
     EXPECT_EQ(commandValidBuffer[0], 1);
     EXPECT_TRUE(preparedCommandBuffer[0].valid);
     EXPECT_EQ(rawCommandBuffer[0], -rawFromPprRadians(0.25));
+}
+
+TEST_F(CanDriverHWSmokeTest, PrepareCommandsSubtractsSoftwareZeroOffset)
+{
+    ros::Time::init();
+
+    std::deque<can_driver::CanDriverJointConfig> joints(1);
+    joints[0].name = "test_arm";
+    joints[0].motorId = static_cast<MotorID>(0x05);
+    joints[0].protocol = CanType::PP;
+    joints[0].canDevice = "fake0";
+    joints[0].controlMode = "csp";
+    joints[0].positionScale = 2.0 * M_PI / 65536.0;
+    joints[0].velocityScale = 2.0 * M_PI / 65536.0;
+    joints[0].zeroOffsetRad = -0.25;
+    joints[0].posCmd = 0.0;
+
+    std::vector<int32_t> rawCommandBuffer(1, 0);
+    std::vector<uint8_t> commandValidBuffer(1, 0);
+    std::vector<can_driver::CanDriverPreparedCommand> preparedCommandBuffer(
+        1, can_driver::CanDriverPreparedCommand{});
+    std::mutex jointStateMutex;
+    can_driver::CanDriverIoRuntime::WriteConfig config;
+
+    can_driver::CanDriverIoRuntime::PrepareCommands(&joints,
+                                                    &rawCommandBuffer,
+                                                    &commandValidBuffer,
+                                                    &preparedCommandBuffer,
+                                                    &jointStateMutex,
+                                                    config);
+
+    EXPECT_EQ(commandValidBuffer[0], 1);
+    EXPECT_TRUE(preparedCommandBuffer[0].valid);
+    EXPECT_EQ(rawCommandBuffer[0], rawFromPprRadians(0.25));
 }
 
 TEST_F(CanDriverHWSmokeTest, PrepareCommandsAppliesNegativeDirectionSignToVelocity)
@@ -2591,9 +2768,200 @@ TEST_F(CanDriverHWSmokeTest, LocalPersistedZeroOffsetRestoresOnNextInit)
         const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
         ASSERT_TRUE(initResult.ok) << initResult.message;
 
-        EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
-        EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), rawFromPprRadians(0.2));
+        EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 0);
+        EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+        EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 0);
     }
+
+    std::filesystem::remove(persistFile);
+}
+
+TEST_F(CanDriverHWSmokeTest, LocalAutoZeroPersistsWithoutWritingMotor)
+{
+    const std::string persistFile = uniqueTempFile("can_driver_auto_zero_offsets");
+    std::filesystem::remove(persistFile);
+
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_auto_zero_local_persist"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+    pnh.setParam("pp_local_zero_offset_file", persistFile);
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZero>(
+        pnh.resolveName("set_zero"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    can_driver::SetZero srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 0.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.apply_to_motor = false;
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 0.25, 1e-4);
+    EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.25, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 0);
+
+    {
+        const auto states = hw.snapshotJointRuntimeStates();
+        ASSERT_EQ(states.size(), 1u);
+        EXPECT_NEAR(states[0].position, 0.0, 1e-4);
+    }
+
+    srv.request.zero_offset_rad = 999.0;
+    ASSERT_TRUE(client.call(srv));
+    EXPECT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 0.0, 1e-4);
+    EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.25, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->persistCalls(), 0);
+
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+    ASSERT_TRUE(fakeDm->isDeviceReady("fake0"));
+    hw.read(ros::Time::now(), ros::Duration(0.01));
+    const auto states = hw.snapshotJointRuntimeStates();
+    ASSERT_EQ(states.size(), 1u);
+    EXPECT_NEAR(states[0].position, 0.0, 1e-4);
+
+    spinner.stop();
+
+    std::ifstream in(persistFile);
+    ASSERT_TRUE(in.is_open());
+    std::string line;
+    ASSERT_TRUE(static_cast<bool>(std::getline(in, line)));
+    EXPECT_NE(line.find("5 -0.25"), std::string::npos);
+
+    std::filesystem::remove(persistFile);
+}
+
+TEST_F(CanDriverHWSmokeTest, LocalPersistedZeroOffsetCompensatesStartupHoldAndCommands)
+{
+    const std::string persistFile =
+        uniqueTempFile("can_driver_zero_offsets_hold_compensate");
+    {
+        std::ofstream out(persistFile, std::ios::trunc);
+        ASSERT_TRUE(out.is_open());
+        out << "5 0.2\n";
+    }
+
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.3));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_local_hold_compensate"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+    pnh.setParam("pp_local_zero_offset_file", persistFile);
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 0);
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), rawFromPprRadians(0.3));
+
+    const auto states = hw.snapshotJointRuntimeStates();
+    ASSERT_EQ(states.size(), 1u);
+    EXPECT_NEAR(states[0].position, pprRadiansFromRaw(rawFromPprRadians(0.3)) + 0.2, 1e-4);
+
+    fakeDm->protocol()->resetQuickPositionCalls();
+    hw.acceptDirectCommand(0, false, states[0].position, ros::Time::now());
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    hw.acceptDirectCommand(0, false, 0.2, ros::Time::now());
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->quickPositionCalls(), 2);
+    EXPECT_EQ(fakeDm->protocol()->lastQuickPosition(), 0);
+
+    std::filesystem::remove(persistFile);
+}
+
+TEST_F(CanDriverHWSmokeTest, ApplyToMotorClearsLocalSoftwareOffsetAfterPersistedLocalZero)
+{
+    const std::string persistFile =
+        uniqueTempFile("can_driver_zero_offsets_apply_to_motor_clear");
+    {
+        std::ofstream out(persistFile, std::ios::trunc);
+        ASSERT_TRUE(out.is_open());
+        out << "5 -0.25\n";
+    }
+
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_zero_apply_motor_clear_local"));
+
+    pnh.setParam("joints", makeSingleCspJoint());
+    pnh.setParam("pp_local_zero_offset_persistence_enabled", true);
+    pnh.setParam("pp_local_zero_offset_file", persistFile);
+    pnh.setParam("pp_zero_offset_persist_on_apply_to_motor", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    const auto initResult = hw.operationalCoordinator().RequestInit("fake0", false);
+    ASSERT_TRUE(initResult.ok) << initResult.message;
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    ros::ServiceClient client = nh.serviceClient<can_driver::SetZero>(
+        pnh.resolveName("set_zero"));
+    ASSERT_TRUE(client.waitForExistence(ros::Duration(1.0)));
+
+    setFreshPositionFeedback(*fakeDm,
+                             "fake0",
+                             CanType::PP,
+                             static_cast<MotorID>(0x05),
+                             rawFromPprRadians(0.25),
+                             false);
+
+    can_driver::SetZero srv;
+    srv.request.motor_id = 0x05u;
+    srv.request.zero_offset_rad = 123.0;
+    srv.request.use_current_position_as_zero = true;
+    srv.request.apply_to_motor = true;
+    ASSERT_TRUE(client.call(srv));
+    ASSERT_TRUE(srv.response.success) << srv.response.message;
+    EXPECT_NEAR(srv.response.current_position_rad, 0.0, 1e-4);
+    EXPECT_NEAR(srv.response.previous_zero_offset_rad, 0.0, 1e-4);
+    EXPECT_NEAR(srv.response.applied_zero_offset_rad, -0.25, 1e-4);
+    EXPECT_EQ(fakeDm->protocol()->setOffsetCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastOffsetRaw(), -rawFromPprRadians(0.25));
+
+    spinner.stop();
+
+    std::ifstream in(persistFile);
+    ASSERT_TRUE(in.is_open());
+    std::string line;
+    ASSERT_TRUE(static_cast<bool>(std::getline(in, line)));
+    EXPECT_NE(line.find("5 0.00000000000000000"), std::string::npos);
+
+    fakeDm->protocol()->setFeedbackPosition(rawFromPprRadians(0.25));
+    ASSERT_TRUE(fakeDm->isDeviceReady("fake0"));
+    hw.read(ros::Time::now(), ros::Duration(0.01));
+    const auto states = hw.snapshotJointRuntimeStates();
+    ASSERT_EQ(states.size(), 1u);
+    EXPECT_NEAR(states[0].position, pprRadiansFromRaw(rawFromPprRadians(0.25)), 1e-4);
 
     std::filesystem::remove(persistFile);
 }

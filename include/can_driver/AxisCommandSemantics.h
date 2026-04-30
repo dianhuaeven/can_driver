@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <string>
 
 namespace can_driver {
@@ -130,6 +131,31 @@ inline double controlModeActualFeedbackValue(const CanDriverJointConfig &joint, 
 inline double effectivePositionScale(const CanDriverJointConfig &joint)
 {
     return joint.positionScale * joint.directionSign;
+}
+
+inline double rawPositionToJointPosition(const CanDriverJointConfig &joint, int64_t rawPosition)
+{
+    return static_cast<double>(rawPosition) * effectivePositionScale(joint) +
+           joint.zeroOffsetRad;
+}
+
+inline double jointPositionToRawPositionValue(const CanDriverJointConfig &joint,
+                                              double jointPosition)
+{
+    return jointPosition - joint.zeroOffsetRad;
+}
+
+inline double rawPositionValueToRawCount(const CanDriverJointConfig &joint,
+                                         double rawPositionValue)
+{
+    return rawPositionValue / effectivePositionScale(joint);
+}
+
+inline double jointPositionToRawCount(const CanDriverJointConfig &joint,
+                                      double jointPosition)
+{
+    return rawPositionValueToRawCount(
+        joint, jointPositionToRawPositionValue(joint, jointPosition));
 }
 
 inline double effectiveVelocityScale(const CanDriverJointConfig &joint)
