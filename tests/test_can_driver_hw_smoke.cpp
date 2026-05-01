@@ -803,6 +803,32 @@ protected:
         return joints;
     }
 
+    static XmlRpc::XmlRpcValue makeGroupedVelocityJoints()
+    {
+        XmlRpc::XmlRpcValue joints;
+        joints.setSize(2);
+
+        joints[0]["name"] = "arm_joint";
+        joints[0]["motor_id"] = static_cast<int>(0x141);
+        joints[0]["protocol"] = "MT";
+        joints[0]["can_device"] = "fake0";
+        joints[0]["control_mode"] = "velocity";
+        joints[0]["velocity_scale"] = 0.1;
+        joints[0]["position_scale"] = 1.0;
+        joints[0]["safety_group"] = "arm";
+
+        joints[1]["name"] = "chassis_joint";
+        joints[1]["motor_id"] = static_cast<int>(0x142);
+        joints[1]["protocol"] = "MT";
+        joints[1]["can_device"] = "fake0";
+        joints[1]["control_mode"] = "velocity";
+        joints[1]["velocity_scale"] = 0.1;
+        joints[1]["position_scale"] = 1.0;
+        joints[1]["safety_group"] = "chassis";
+
+        return joints;
+    }
+
     static void setPositionLimits(ros::NodeHandle &pnh,
                                   const std::string &jointName,
                                   double minPosition,
@@ -1534,6 +1560,78 @@ TEST_F(CanDriverHWSmokeTest, WriteUsesFreshSharedFeedbackInsteadOfProtocolCacheF
     EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
     EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x141u);
     EXPECT_EQ(fakeDm->protocol()->lastVelocity(), 20);
+
+    spinner.stop();
+}
+
+TEST_F(CanDriverHWSmokeTest, WriteHaltsOnlyFaultedSafetyGroup)
+{
+    auto fakeDm = std::make_shared<FakeDeviceManager>();
+    CanDriverHW hw(fakeDm);
+
+    ros::NodeHandle nh;
+    ros::NodeHandle pnh(uniqueNs("can_driver_hw_smoke_grouped_fault"));
+
+    pnh.setParam("joints", makeGroupedVelocityJoints());
+    pnh.setParam("debug_bypass_ros_control", true);
+    pnh.setParam("motor_state_period_sec", 0.2);
+    pnh.setParam("safety_stop_on_fault", true);
+    pnh.setParam("safety_require_enabled_for_motion", false);
+
+    ASSERT_TRUE(hw.init(nh, pnh));
+    enterRunning(hw);
+    fakeDm->setSyncSharedFeedbackFromProtocol(false);
+
+    ros::AsyncSpinner spinner(1);
+    spinner.start();
+
+    auto armPub = nh.advertise<std_msgs::Float64>(
+        pnh.resolveName("motor/arm_joint/cmd_velocity"), 1);
+    auto chassisPub = nh.advertise<std_msgs::Float64>(
+        pnh.resolveName("motor/chassis_joint/cmd_velocity"), 1);
+    for (int i = 0; i < 20 &&
+                    (armPub.getNumSubscribers() == 0 ||
+                     chassisPub.getNumSubscribers() == 0);
+         ++i) {
+        ros::Duration(0.01).sleep();
+    }
+
+    const auto nowNs = can_driver::SharedDriverSteadyNowNs();
+    fakeDm->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x141)),
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->fault = true;
+            feedback->faultValid = true;
+            feedback->lastRxSteadyNs = nowNs;
+            feedback->lastValidStateSteadyNs = nowNs;
+        });
+    fakeDm->sharedState()->mutateAxisFeedback(
+        can_driver::MakeAxisKey("fake0", CanType::MT, static_cast<MotorID>(0x142)),
+        [nowNs](can_driver::SharedDriverState::AxisFeedbackState *feedback) {
+            feedback->feedbackSeen = true;
+            feedback->enabled = true;
+            feedback->enabledValid = true;
+            feedback->fault = false;
+            feedback->faultValid = true;
+            feedback->lastRxSteadyNs = nowNs;
+            feedback->lastValidStateSteadyNs = nowNs;
+        });
+
+    std_msgs::Float64 msg;
+    msg.data = 2.0;
+    armPub.publish(msg);
+    chassisPub.publish(msg);
+    ros::Duration(0.05).sleep();
+
+    hw.write(ros::Time::now(), ros::Duration(0.01));
+
+    EXPECT_EQ(fakeDm->protocol()->stopCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->velocityCalls(), 1);
+    EXPECT_EQ(fakeDm->protocol()->lastVelocityMotor(), 0x142u);
+    EXPECT_EQ(hw.lifecycleMode(), can_driver::SystemOpMode::Running);
 
     spinner.stop();
 }

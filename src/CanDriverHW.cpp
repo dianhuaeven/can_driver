@@ -647,6 +647,7 @@ bool CanDriverHW::parseAndSetupJoints(const ros::NodeHandle &pnh)
 
         JointConfig jc;
         jc.name = p.name;
+        jc.safetyGroup = p.safetyGroup;
         jc.canDevice = p.canDevice;
         jc.controlMode = p.controlMode;
         jc.motorId = p.motorId;
@@ -830,6 +831,99 @@ void CanDriverHW::configureLifecycleCoordinator()
             return preloadStartupPositionTargets(device);
         },
     });
+}
+
+bool CanDriverHW::applyGroupedFaultStops()
+{
+    if (!safetyStopOnFault_ || !deviceManager_) {
+        return false;
+    }
+
+    const auto sharedState = deviceManager_->getSharedDriverState();
+    if (!sharedState) {
+        return false;
+    }
+
+    std::set<std::string> faultedGroups;
+    {
+        std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+        for (const auto &joint : joints_) {
+            can_driver::SharedDriverState::AxisFeedbackState feedback;
+            const auto axisKey =
+                can_driver::MakeAxisKey(joint.canDevice, joint.protocol, joint.motorId);
+            if (!sharedState->getAxisFeedback(axisKey, &feedback) ||
+                !sharedFeedbackFresh(feedback) ||
+                !feedback.faultValid || !feedback.fault) {
+                continue;
+            }
+            faultedGroups.insert(joint.safetyGroup.empty() ? "default" : joint.safetyGroup);
+        }
+
+        if (faultedGroups.empty()) {
+            for (auto &joint : joints_) {
+                joint.stopIssuedOnFault = false;
+            }
+            return false;
+        }
+
+        for (std::size_t i = 0; i < joints_.size() && i < commandValidBuffer_.size(); ++i) {
+            const std::string group =
+                joints_[i].safetyGroup.empty() ? "default" : joints_[i].safetyGroup;
+            if (faultedGroups.find(group) != faultedGroups.end()) {
+                commandValidBuffer_[i] = 0;
+            } else {
+                joints_[i].stopIssuedOnFault = false;
+            }
+        }
+    }
+
+    struct StopTarget {
+        std::string jointName;
+        std::string canDevice;
+        CanType protocol{CanType::MT};
+        MotorID motorId{MotorID::LeftWheel};
+    };
+
+    std::vector<StopTarget> stopTargets;
+    {
+        std::lock_guard<std::mutex> stateLock(jointStateMutex_);
+        for (auto &joint : joints_) {
+            const std::string group =
+                joint.safetyGroup.empty() ? "default" : joint.safetyGroup;
+            if (faultedGroups.find(group) == faultedGroups.end()) {
+                continue;
+            }
+            if (joint.stopIssuedOnFault) {
+                continue;
+            }
+            joint.stopIssuedOnFault = true;
+            stopTargets.push_back(
+                StopTarget{joint.name, joint.canDevice, joint.protocol, joint.motorId});
+        }
+    }
+
+    for (const auto &target : stopTargets) {
+        auto proto = deviceManager_->getProtocol(target.canDevice, target.protocol);
+        auto devMutex = deviceManager_->getDeviceMutex(target.canDevice);
+        if (!proto || !devMutex) {
+            continue;
+        }
+        std::lock_guard<std::mutex> devLock(*devMutex);
+        if (!proto->Stop(target.motorId)) {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[CanDriverHW] Joint '%s' grouped fault halt rejected on '%s'.",
+                target.jointName.c_str(),
+                target.canDevice.c_str());
+        } else {
+            ROS_WARN_THROTTLE(
+                1.0,
+                "[CanDriverHW] Joint '%s' halted by safety group fault.",
+                target.jointName.c_str());
+        }
+    }
+
+    return true;
 }
 
 bool CanDriverHW::applyDeviceProtocolConfig(const std::string &deviceFilter)
@@ -1511,6 +1605,7 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
         &preparedCommandBuffer_,
         &jointStateMutex_,
         writeConfig);
+    const bool groupedFaultActive = applyGroupedFaultStops();
     can_driver::CanDriverIoRuntime::DispatchPreparedCommands(*deviceManager_,
                                                              jointGroups_,
                                                              &joints_,
@@ -1521,9 +1616,10 @@ void CanDriverHW::write(const ros::Time & /*time*/, const ros::Duration &period)
                                                              &commandGate_,
                                                              writeConfig,
                                                              &anyFaultObserved);
-    bool unhealthy = anyFaultObserved;
+    bool unhealthy = false;
     std::string healthDetail;
-    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+    if (!groupedFaultActive && !anyFaultObserved &&
+        !lifecycleHealthHealthy(&healthDetail)) {
         unhealthy = true;
         ROS_WARN_THROTTLE(1.0,
                           "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
@@ -1678,9 +1774,9 @@ void CanDriverHW::publishMotorStates(ros::Publisher &publisher)
     }
     auto publishResult = can_driver::CanDriverIoRuntime::BuildMotorStateMessages(
         *deviceManager_, jointGroups_, joints_, &jointStateMutex_);
-    bool unhealthy = publishResult.anyFault;
+    bool unhealthy = false;
     std::string healthDetail;
-    if (!unhealthy && !lifecycleHealthHealthy(&healthDetail)) {
+    if (!publishResult.anyFault && !lifecycleHealthHealthy(&healthDetail)) {
         unhealthy = true;
         ROS_WARN_THROTTLE(1.0,
                           "[CanDriverHW] Auto-fault because lifecycle health check failed: %s",
