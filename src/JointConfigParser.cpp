@@ -198,6 +198,17 @@ bool parse(const XmlRpc::XmlRpcValue &jointList,
 
         ParsedJointConfig jc;
         jc.name = static_cast<std::string>(jv["name"]);
+        if (jv.hasMember("safety_group")) {
+            if (jv["safety_group"].getType() != XmlRpc::XmlRpcValue::TypeString) {
+                errorMsg = "Joint '" + jc.name + "': safety_group must be string.";
+                return false;
+            }
+            jc.safetyGroup = static_cast<std::string>(jv["safety_group"]);
+            if (jc.safetyGroup.empty()) {
+                errorMsg = "Joint '" + jc.name + "': safety_group must be non-empty.";
+                return false;
+            }
+        }
         jc.canDevice = static_cast<std::string>(jv["can_device"]);
         jc.controlMode = static_cast<std::string>(jv["control_mode"]);
         const auto axisMode = can_driver::axisControlModeFromString(jc.controlMode);

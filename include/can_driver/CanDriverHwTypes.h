@@ -30,6 +30,7 @@ struct CanDriverPreparedCommand {
 
 struct CanDriverJointConfig {
     std::string name;
+    std::string safetyGroup{"default"};
     MotorID motorId{MotorID::LeftWheel};
     CanType protocol{CanType::MT};
     std::string canDevice;

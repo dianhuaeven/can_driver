@@ -103,6 +103,7 @@ can_driver_node:
     #   ip_goal_tolerance: 0.001
 
     - name: elbow_pitch_joint   # 小臂俯仰（第 3 轴）
+      safety_group: arm
       motor_id: 0x13
       protocol: PP
       can_device: canable1
@@ -117,6 +118,7 @@ can_driver_node:
 
 
     - name: wrist_pitch_joint    # 腕部俯仰（第 4 轴）
+      safety_group: arm
       motor_id: 0x14
       protocol: PP
       can_device: canable1
@@ -129,6 +131,7 @@ can_driver_node:
       ip_goal_tolerance: 0.001
 
     - name: wrist_roll_joint     # 腕部滚转（第 5 轴）
+      safety_group: arm
       motor_id: 0x16
       protocol: PP
       can_device: canable1
@@ -137,6 +140,7 @@ can_driver_node:
       velocity_scale: 65536
 
     - name: wrist_yaw_joint      # 腕部偏航（第 6 轴）
+      safety_group: arm
       motor_id: 0x15
       protocol: PP
       can_device: canable1
@@ -146,6 +150,7 @@ can_driver_node:
       direction_sign: -1.0
 
     - name: left_gripper_finger_joint  # 左夹爪（第 7 轴）
+      safety_group: arm
       motor_id: 0x17
       protocol: PP
       can_device: canable1
@@ -171,6 +176,7 @@ can_driver_node:
     # 否则会连同速度命令换算一起改变，导致 DM 控制量失真。
 
     - name: left_front_wheel_joint
+      safety_group: chassis
       motor_id: 0x07
       master_id: 0x08  # 可选：填写电机当前反馈使用的 Master ID；默认 0x000
       protocol: DM
@@ -179,6 +185,7 @@ can_driver_node:
       direction_sign: 1.0
 
     - name: right_front_wheel_joint
+      safety_group: chassis
       motor_id: 0x05
       master_id: 0x06  # 驱动只按此 ID 接收反馈，不会改写电机寄存器
       protocol: DM

@@ -282,6 +282,7 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     ASSERT_TRUE(parse(list, out, err));
     ASSERT_EQ(out.size(), 1u);
     EXPECT_EQ(out[0].name, "joint_default_scale");
+    EXPECT_EQ(out[0].safetyGroup, "default");
     EXPECT_EQ(out[0].canDevice, "canable0");
     EXPECT_EQ(out[0].controlMode, "position");
     EXPECT_EQ(out[0].protocol, CanType::PP);
@@ -293,6 +294,33 @@ TEST(JointConfigParser, ParseUsesDefaultScalesWhenNotProvided)
     EXPECT_DOUBLE_EQ(out[0].ipMaxAcceleration, 2.0);
     EXPECT_DOUBLE_EQ(out[0].ipMaxJerk, 10.0);
     EXPECT_DOUBLE_EQ(out[0].ipGoalTolerance, 1e-3);
+}
+
+TEST(JointConfigParser, ParseReadsSafetyGroup)
+{
+    XmlRpc::XmlRpcValue motorId(9);
+    auto joint = makeJointBase("joint_grouped", motorId);
+    joint["safety_group"] = std::string("arm");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    ASSERT_TRUE(parse(list, out, err));
+    ASSERT_EQ(out.size(), 1u);
+    EXPECT_EQ(out[0].safetyGroup, "arm");
+}
+
+TEST(JointConfigParser, ParseRejectsEmptySafetyGroup)
+{
+    XmlRpc::XmlRpcValue motorId(10);
+    auto joint = makeJointBase("joint_empty_group", motorId);
+    joint["safety_group"] = std::string("");
+    auto list = makeJointList(joint);
+
+    std::vector<joint_config_parser::ParsedJointConfig> out;
+    std::string err;
+    EXPECT_FALSE(parse(list, out, err));
+    EXPECT_NE(err.find("safety_group"), std::string::npos);
 }
 
 TEST(JointConfigParser, ParseReadsExplicitScales)
